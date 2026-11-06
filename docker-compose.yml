@@ -1,0 +1,56 @@
+# Local development stack.
+#   postgres : source of truth for shows, seats and bookings
+#   redis    : started now, but the API does NOT use it until Phase 2
+#   api      : the SeatLock Go server
+# Values come from .env if it exists (see .env.example), otherwise the defaults after ":-".
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-seatlock}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-seatlock}
+      POSTGRES_DB: ${POSTGRES_DB:-seatlock}
+    ports:
+      - "${POSTGRES_PORT:-5434}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Creates the seatlock_test database on first start (used by integration tests).
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-seatlock} -d ${POSTGRES_DB:-seatlock}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: .
+    environment:
+      HTTP_ADDR: ":8080"
+      # Inside the Compose network, Postgres is reachable at host "postgres", port 5432.
+      DATABASE_URL: postgres://${POSTGRES_USER:-seatlock}:${POSTGRES_PASSWORD:-seatlock}@postgres:5432/${POSTGRES_DB:-seatlock}?sslmode=disable
+      RUN_MIGRATIONS: "true"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:8080/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:

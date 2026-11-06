@@ -1,0 +1,16 @@
+# Local secrets / environment. Never commit a real .env file.
+.env
+
+# Build output
+/bin/
+/tmp/
+*.exe
+*.test
+*.out
+coverage.*
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

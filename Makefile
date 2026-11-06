@@ -1,0 +1,59 @@
+# SeatLock developer commands. Run `make <target>`.
+# Settings come from .env when present (copy .env.example to .env).
+
+-include .env
+export
+
+POSTGRES_USER ?= seatlock
+POSTGRES_DB   ?= seatlock
+SWAG_VERSION  := v1.16.4
+
+.PHONY: up down logs run test test-integration migrate-up migrate-down seed swagger lint
+
+## up: build the API image and start postgres, redis and api in the background
+up:
+	docker compose up -d --build --wait
+
+## down: stop all containers (data volume is kept; use `docker compose down -v` to wipe it)
+down:
+	docker compose down
+
+## logs: follow logs from all containers
+logs:
+	docker compose logs -f
+
+## run: run the API on your machine (Postgres must be up: `make up`)
+run:
+	go run ./cmd/api
+
+## test: fast unit tests (no database needed)
+test:
+	go test -count=1 ./...
+
+## test-integration: tests against the real Postgres from docker compose
+test-integration:
+	go test -count=1 -tags=integration ./...
+
+## migrate-up: apply all pending migrations to DATABASE_URL
+migrate-up:
+	go run ./cmd/migrate up
+
+## migrate-down: roll back ONE migration
+migrate-down:
+	go run ./cmd/migrate down
+
+## seed: load demo data (safe to run more than once)
+seed:
+	docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U $(POSTGRES_USER) -d $(POSTGRES_DB) < db/seed/seed.sql
+
+## swagger: regenerate the OpenAPI docs in ./docs from the handler annotations
+swagger:
+	go run github.com/swaggo/swag/cmd/swag@$(SWAG_VERSION) init -g cmd/api/main.go -o docs --parseInternal
+	gofmt -w docs/docs.go
+
+## lint: go vet + check formatting (fails if any file is not gofmt-ed)
+lint:
+	go vet ./...
+	go vet -tags=integration ./...
+	@test -z "$$(gofmt -l .)" || (echo "Files need gofmt:"; gofmt -l .; exit 1)
+	@echo "lint OK"
