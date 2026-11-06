@@ -85,6 +85,24 @@ func setupTestDB(t *testing.T) testFixture {
 	return testFixture{pool: pool, repo: NewPostgresRepository(pool), showID: showID, seatIDs: seatIDs}
 }
 
+// warmUpPool makes the pool open n connections now: it borrows n at once,
+// then gives them all back. They stay open in the pool, ready to use.
+func warmUpPool(t *testing.T, pool *pgxpool.Pool, n int) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	conns := make([]*pgxpool.Conn, 0, n)
+	for i := 0; i < n; i++ {
+		conn, err := pool.Acquire(ctx)
+		require.NoError(t, err)
+		conns = append(conns, conn)
+	}
+	for _, conn := range conns {
+		conn.Release()
+	}
+}
+
 func TestPostgres_CreateAndGetBooking(t *testing.T) {
 	f := setupTestDB(t)
 	ctx := context.Background()
@@ -180,6 +198,13 @@ func TestConcurrentBookingSameSeat(t *testing.T) {
 
 	const attempts = 50
 	targetSeat := f.seatIDs[0]
+
+	// Open all 50 database connections BEFORE the race. Otherwise every
+	// goroutine has to open a brand-new connection at the same instant, and
+	// on a slow machine (e.g. Docker Desktop) that handshake burst can eat the
+	// repository's 3s query timeout. We want to test the race inside
+	// Postgres, not how fast TCP connections open.
+	warmUpPool(t, f.pool, attempts)
 
 	start := make(chan struct{}) // the starting gun
 	var wg sync.WaitGroup
