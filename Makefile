@@ -47,8 +47,10 @@ seed:
 	docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U $(POSTGRES_USER) -d $(POSTGRES_DB) < db/seed/seed.sql
 
 ## swagger: regenerate the OpenAPI docs in ./docs from the handler annotations
+##          (needs the swag CLI once: go install github.com/swaggo/swag/cmd/swag@v1.16.4)
 swagger:
-	go run github.com/swaggo/swag/cmd/swag@$(SWAG_VERSION) init -g cmd/api/main.go -o docs --parseInternal
+	@command -v swag >/dev/null || (echo "swag not found. Install it: go install github.com/swaggo/swag/cmd/swag@$(SWAG_VERSION)"; exit 1)
+	swag init -g cmd/api/main.go -o docs --parseInternal
 	gofmt -w docs/docs.go
 
 ## lint: go vet + check formatting (fails if any file is not gofmt-ed)

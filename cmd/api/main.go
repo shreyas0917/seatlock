@@ -12,6 +12,15 @@
 // The server shuts down gracefully on Ctrl+C (SIGINT) or SIGTERM (what Docker
 // sends on `docker compose down`): it stops accepting new connections,
 // finishes in-flight requests, then closes the database pool.
+//
+// The @-lines below are general swag annotations for the generated API docs
+// (served at /swagger/index.html; regenerate with `make swagger`).
+//
+//	@title			SeatLock API
+//	@version		1.0
+//	@description	High-concurrency ticket booking backend. A seat can never be booked twice:
+//	@description	PostgreSQL's UNIQUE(show_id, seat_id) constraint is the final authority.
+//	@BasePath		/
 package main
 
 import (
@@ -24,6 +33,8 @@ import (
 	"syscall"
 	"time"
 
+	// Blank import: registers the generated OpenAPI spec so /swagger can serve it.
+	_ "github.com/shreyas0917/seatlock/docs"
 	"github.com/shreyas0917/seatlock/internal/booking"
 	"github.com/shreyas0917/seatlock/internal/config"
 	"github.com/shreyas0917/seatlock/internal/db"
