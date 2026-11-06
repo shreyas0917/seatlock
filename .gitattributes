@@ -1,0 +1,3 @@
+# Always use LF line endings, so shell scripts, SQL and the Makefile work
+# inside Linux containers even when the repo is cloned on Windows.
+* text=auto eol=lf
