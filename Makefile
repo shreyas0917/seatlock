@@ -10,7 +10,7 @@ SWAG_VERSION  := v1.16.4
 # Extra flags for go test, e.g. `make test TEST_FLAGS=-race` (CI does this on Linux).
 TEST_FLAGS    ?=
 
-.PHONY: up down logs run test test-integration verify migrate-up migrate-down seed swagger lint
+.PHONY: up down logs run test test-integration verify migrate-up migrate-down seed reset-data swagger lint
 
 ## up: build the API image and start postgres, redis and api in the background
 up:
@@ -53,6 +53,13 @@ migrate-down:
 ## seed: load demo data (safe to run more than once)
 seed:
 	docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U $(POSTGRES_USER) -d $(POSTGRES_DB) < db/seed/seed.sql
+
+## reset-data: delete all bookings, holds, payments, outbox rows and idempotency keys
+##             (keeps shows and seats) AND the Redis seat locks, so the demos have
+##             free seats again and Redis agrees with Postgres
+reset-data:
+	docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U $(POSTGRES_USER) -d $(POSTGRES_DB) -c "TRUNCATE bookings, payments, holds, outbox, idempotency_keys RESTART IDENTITY"
+	docker compose exec -T redis sh -c "redis-cli --scan --pattern 'seat:*' | xargs -r redis-cli del"
 
 ## swagger: regenerate the OpenAPI docs in ./docs from the handler annotations
 ##          (needs the swag CLI once: go install github.com/swaggo/swag/cmd/swag@v1.16.4)

@@ -5,7 +5,8 @@
 #   2. Redis is STOPPED (docker compose stop redis)
 #   3. user2 tries to hold seat Y                        -> 503 LOCK_UNAVAILABLE (fail closed)
 #      /readyz                                           -> 200, redis "down" (API stays in service)
-#   4. user1 confirms the hold from step 1               -> 201 (existing reservation completes)
+#   4. user1 confirms (pays for) the hold from step 1    -> 201 (existing reservation completes;
+#      payment and idempotency live in Postgres, not Redis)
 #   5. a fake hold id / another user's hold              -> 404 HOLD_NOT_FOUND
 #      user3 cancels their hold                          -> 200 (works without Redis)
 #   6. Redis is STARTED again and healthy -> user2's hold on Y works -> 201
@@ -24,6 +25,7 @@ RUN_ID="$(date +%s)"
 USER1="rd-$RUN_ID-user1"
 USER2="rd-$RUN_ID-user2"
 USER3="rd-$RUN_ID-user3"
+mock_reset
 
 # If anything goes wrong, never leave Redis stopped.
 trap 'docker compose start redis >/dev/null 2>&1' EXIT
@@ -31,7 +33,7 @@ trap 'docker compose start redis >/dev/null 2>&1' EXIT
 read -r SEAT_X SEAT_Y SEAT_Z <<< "$(available_seats 3 | tr '\n' ' ')"
 if [ -z "${SEAT_Z:-}" ]; then
   echo "Need 3 AVAILABLE seats in show $SHOW_ID."
-  echo "Reset with: docker compose exec -T postgres psql -U seatlock -d seatlock -c 'TRUNCATE bookings, holds'"
+  echo "Reset with: make reset-data"
   exit 1
 fi
 echo "Using show $SHOW_ID, seats X=$SEAT_X Y=$SEAT_Y Z=$SEAT_Z"
@@ -60,14 +62,15 @@ if echo "$BODY" | grep -q '"redis":"down"'; then pass "readyz reports $BODY"; el
 
 echo
 echo "Step 4: an EXISTING hold still confirms (PostgreSQL only)"
-request POST /v1/bookings "$USER1" "{\"hold_id\": $HOLD1}"
-expect_status 201 "user1 confirms hold $HOLD1 with Redis down"
+request POST /v1/bookings "$USER1" "{\"hold_id\": $HOLD1}" "rd-$RUN_ID-confirm1"
+expect_status 201 "user1 confirms (pays for) hold $HOLD1 with Redis down"
+expect_mock total_charges 1 "the payment went through"
 
 echo
 echo "Step 5: invalid confirms are still rejected"
-request POST /v1/bookings "$USER1" '{"hold_id": 999999999}'
+request POST /v1/bookings "$USER1" '{"hold_id": 999999999}' "rd-$RUN_ID-fake"
 expect_status 404 "confirm a fake hold id"
-request POST /v1/bookings "$USER2" "{\"hold_id\": $HOLD3}"
+request POST /v1/bookings "$USER2" "{\"hold_id\": $HOLD3}" "rd-$RUN_ID-steal"
 expect_status 404 "user2 confirms user3's hold"
 request DELETE "/v1/holds/$HOLD3" "$USER3" ""
 expect_status 200 "user3 cancels their hold with Redis down"
@@ -85,5 +88,6 @@ expect_status 201 "user2 holds seat Y after recovery (attempt $attempt)"
 
 echo
 echo "Step 7: invariants"
+mock_stats
 run_verify
 finish

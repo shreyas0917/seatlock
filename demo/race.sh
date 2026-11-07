@@ -4,8 +4,8 @@
 #   1. picks the first AVAILABLE seat of the show
 #   2. 20 different users try to HOLD it at the same moment
 #        expected: 201 Created : 1   409 Conflict: 19
-#   3. the winner CONFIRMS its hold
-#        expected: 201
+#   3. the winner CONFIRMS (pays for) its hold, with an Idempotency-Key
+#        expected: 201, and exactly one charge at the mock gateway
 #   4. runs demo/verify.sql: every invariant check must return 0 rows
 #
 # Usage:  ./demo/race.sh            (API must be running: make up && make seed)
@@ -17,11 +17,12 @@ source demo/lib.sh
 
 REQUESTS="${REQUESTS:-20}"
 RUN_ID="$(date +%s)"       # makes user ids unique per run
+mock_reset
 
 SEAT_ID="$(available_seats 1)"
 if [ -z "$SEAT_ID" ]; then
   echo "No AVAILABLE seat left in show $SHOW_ID."
-  echo "Reset with: docker compose exec -T postgres psql -U seatlock -d seatlock -c 'TRUNCATE bookings, holds'"
+  echo "Reset with: make reset-data"
   exit 1
 fi
 echo "Step 1: $REQUESTS users try to HOLD show $SHOW_ID, seat $SEAT_ID at the same moment ..."
@@ -64,9 +65,11 @@ if [ -n "$WINNER" ]; then
   HOLD_ID="$(json_field hold_id)"
   echo
   echo "Step 2: the winner (race-$RUN_ID-user-$WINNER) confirms hold $HOLD_ID ..."
-  request POST /v1/bookings "race-$RUN_ID-user-$WINNER" "{\"hold_id\": $HOLD_ID}"
+  request POST /v1/bookings "race-$RUN_ID-user-$WINNER" "{\"hold_id\": $HOLD_ID}" "race-$RUN_ID-confirm"
   echo "  $BODY"
-  expect_status 201 "winner confirms its hold"
+  expect_status 201 "winner confirms (pays for) its hold"
+  expect_mock total_charges 1 "exactly one charge"
+  mock_stats
 fi
 
 rm -f "$RESULTS_DIR"/*
