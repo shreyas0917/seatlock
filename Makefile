@@ -31,8 +31,10 @@ test:
 	go test -count=1 ./...
 
 ## test-integration: tests against the real Postgres from docker compose
+## -p 1 runs one package at a time: integration tests in different packages
+## share the seatlock_test database, so they must not TRUNCATE it in parallel.
 test-integration:
-	go test -count=1 -tags=integration ./...
+	go test -count=1 -p 1 -tags=integration ./...
 
 ## migrate-up: apply all pending migrations to DATABASE_URL
 migrate-up:

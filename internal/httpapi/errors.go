@@ -50,23 +50,44 @@ func mapError(err error) httpError {
 		return httpError{http.StatusNotFound, "BOOKING_NOT_FOUND", "booking not found"}
 	case errors.Is(err, booking.ErrSeatAlreadyBooked):
 		return httpError{http.StatusConflict, "SEAT_ALREADY_BOOKED", "this seat has already been booked"}
+	case errors.Is(err, booking.ErrBusy):
+		// Why 503 and not 500: 500 says "the server is broken", so clients and
+		// on-call engineers treat it as a bug. A timeout under load is not a
+		// bug: the server is healthy but temporarily overloaded, and the same
+		// request will probably succeed in a moment. 503 Service Unavailable
+		// (with Retry-After) says exactly that, so clients can back off and
+		// retry instead of giving up, and alerts can tell "overload" apart
+		// from "broken code".
+		return httpError{http.StatusServiceUnavailable, "SERVICE_BUSY", "the service is busy, please retry shortly"}
 	default:
 		return httpError{http.StatusInternalServerError, "INTERNAL_ERROR", "internal server error"}
 	}
 }
 
-// writeError sends the JSON error response for err, and logs unexpected
-// (500) errors together with the request ID so they can be found in the logs.
+// writeError sends the JSON error response for err, and logs 500 and 503
+// errors (with the full error text and the request ID) so they can be found
+// in the logs.
 func (h *handlers) writeError(w http.ResponseWriter, r *http.Request, err error) {
 	he := mapError(err)
 
-	if he.status == http.StatusInternalServerError {
+	switch he.status {
+	case http.StatusInternalServerError:
 		h.logger.Error("request failed",
 			"request_id", middleware.GetReqID(r.Context()),
 			"method", r.Method,
 			"path", r.URL.Path,
 			"error", err.Error(),
 		)
+	case http.StatusServiceUnavailable:
+		// Not a bug, but we still log the full error so overload is visible.
+		h.logger.Warn("service unavailable",
+			"request_id", middleware.GetReqID(r.Context()),
+			"method", r.Method,
+			"path", r.URL.Path,
+			"error", err.Error(),
+		)
+		// Tells well-behaved clients how many seconds to wait before retrying.
+		w.Header().Set("Retry-After", "1")
 	}
 
 	writeJSON(w, he.status, ErrorResponse{Error: ErrorBody{Code: he.code, Message: he.message}})

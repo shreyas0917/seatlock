@@ -25,7 +25,11 @@ import (
 // deadline and a cancellation signal. If the deadline passes or the caller
 // gives up (e.g. the HTTP client disconnects), every function using that ctx
 // stops waiting and returns an error, instead of hanging forever.
-func NewPool(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
+//
+// maxConns / minConns size the pool (DB_MAX_CONNS / DB_MIN_CONNS). Pool size
+// matters for correctness under load, not just speed: a request that waits
+// for a free connection is spending its query timeout while it waits.
+func NewPool(ctx context.Context, databaseURL string, maxConns, minConns int32) (*pgxpool.Pool, error) {
 	cfg, err := pgxpool.ParseConfig(databaseURL)
 	if err != nil {
 		// %w "wraps" the original error inside ours. Callers can still find
@@ -33,6 +37,9 @@ func NewPool(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
 		// helpful prefix describing what we were doing.
 		return nil, fmt.Errorf("parse database url: %w", err)
 	}
+
+	cfg.MaxConns = maxConns
+	cfg.MinConns = minConns
 
 	// Close idle connections after a while so Postgres is not holding
 	// connections nobody uses.

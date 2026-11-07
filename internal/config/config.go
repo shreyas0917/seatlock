@@ -24,6 +24,15 @@ type Config struct {
 	RunMigrations bool
 	// LogLevel controls how much is logged: debug, info, warn or error.
 	LogLevel slog.Level
+
+	// DBMaxConns is the most connections the pool will open to Postgres.
+	// pgx's default is max(4, number of CPUs), far too small for a burst of
+	// booking requests: extra requests queue for a connection, and that wait
+	// eats into their query timeout.
+	DBMaxConns int32
+	// DBMinConns connections are kept open even when idle, so the first
+	// requests after a quiet period do not all pay the connection handshake.
+	DBMinConns int32
 }
 
 // Load builds a Config from environment variables, using a sensible default
@@ -48,6 +57,17 @@ func Load() (Config, error) {
 	}
 	cfg.LogLevel = level
 
+	if cfg.DBMaxConns, err = getInt32("DB_MAX_CONNS", 25); err != nil {
+		return Config{}, err
+	}
+	if cfg.DBMinConns, err = getInt32("DB_MIN_CONNS", 5); err != nil {
+		return Config{}, err
+	}
+	if cfg.DBMaxConns < 1 || cfg.DBMinConns < 0 || cfg.DBMinConns > cfg.DBMaxConns {
+		return Config{}, fmt.Errorf("invalid pool size: need 0 <= DB_MIN_CONNS (%d) <= DB_MAX_CONNS (%d) and DB_MAX_CONNS >= 1",
+			cfg.DBMinConns, cfg.DBMaxConns)
+	}
+
 	return cfg, nil
 }
 
@@ -58,6 +78,19 @@ func getEnv(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+// getInt32 reads a whole number from an environment variable.
+func getInt32(key string, fallback int32) (int32, error) {
+	raw := getEnv(key, "")
+	if raw == "" {
+		return fallback, nil
+	}
+	n, err := strconv.ParseInt(raw, 10, 32)
+	if err != nil {
+		return 0, fmt.Errorf("invalid %s %q: %w", key, raw, err)
+	}
+	return int32(n), nil
 }
 
 // parseLogLevel turns "debug" / "info" / "warn" / "error" into a slog.Level.

@@ -35,6 +35,27 @@ const (
 // requests pile up forever.
 const defaultQueryTimeout = 3 * time.Second
 
+// dbError is the ONE place repository errors get wrapped. Every method sends
+// unexpected errors through it, so timeout handling cannot be forgotten in one
+// of them.
+//
+// A timeout (context.DeadlineExceeded) can happen in two places, and both mean
+// "Postgres could not serve us in time":
+//   - the query itself ran longer than queryTimeout;
+//   - the query never started, because all pool connections were busy and we
+//     ran out of time WAITING for one (pool acquire uses the same ctx).
+//
+// Those become ErrBusy. fmt.Errorf with two %w verbs wraps BOTH errors, so
+// errors.Is(err, ErrBusy) is true for the HTTP layer AND the original pgx
+// error is still there for the logs.
+func dbError(err error, format string, args ...any) error {
+	op := fmt.Sprintf(format, args...)
+	if errors.Is(err, context.DeadlineExceeded) || pgconn.Timeout(err) {
+		return fmt.Errorf("%s: %w: %w", op, ErrBusy, err)
+	}
+	return fmt.Errorf("%s: %w", op, err)
+}
+
 // PostgresRepository implements Repository using PostgreSQL.
 type PostgresRepository struct {
 	pool         *pgxpool.Pool
@@ -61,7 +82,7 @@ func (r *PostgresRepository) ListShows(ctx context.Context) ([]Show, error) {
 		FROM shows
 		ORDER BY starts_at, id`)
 	if err != nil {
-		return nil, fmt.Errorf("list shows: %w", err)
+		return nil, dbError(err, "list shows")
 	}
 	// rows holds a pooled connection until closed; defer guarantees we
 	// give it back even if scanning fails halfway.
@@ -71,13 +92,13 @@ func (r *PostgresRepository) ListShows(ctx context.Context) ([]Show, error) {
 	for rows.Next() {
 		var s Show
 		if err := rows.Scan(&s.ID, &s.Title, &s.Venue, &s.StartsAt, &s.CreatedAt); err != nil {
-			return nil, fmt.Errorf("scan show: %w", err)
+			return nil, dbError(err, "scan show")
 		}
 		shows = append(shows, s)
 	}
 	// rows.Err reports any error that stopped the loop early (e.g. connection lost).
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("list shows: %w", err)
+		return nil, dbError(err, "list shows")
 	}
 	return shows, nil
 }
@@ -99,7 +120,7 @@ func (r *PostgresRepository) GetShow(ctx context.Context, showID int64) (Show, e
 		return Show{}, ErrShowNotFound
 	}
 	if err != nil {
-		return Show{}, fmt.Errorf("get show %d: %w", showID, err)
+		return Show{}, dbError(err, "get show %d", showID)
 	}
 	return s, nil
 }
@@ -119,7 +140,7 @@ func (r *PostgresRepository) GetSeat(ctx context.Context, seatID int64) (Seat, e
 		return Seat{}, ErrSeatNotFound
 	}
 	if err != nil {
-		return Seat{}, fmt.Errorf("get seat %d: %w", seatID, err)
+		return Seat{}, dbError(err, "get seat %d", seatID)
 	}
 	return s, nil
 }
@@ -141,7 +162,7 @@ func (r *PostgresRepository) ListSeatsWithStatus(ctx context.Context, showID int
 		WHERE s.show_id = $1
 		ORDER BY s.id`, showID)
 	if err != nil {
-		return nil, fmt.Errorf("list seats for show %d: %w", showID, err)
+		return nil, dbError(err, "list seats for show %d", showID)
 	}
 	defer rows.Close()
 
@@ -150,13 +171,13 @@ func (r *PostgresRepository) ListSeatsWithStatus(ctx context.Context, showID int
 		var s SeatWithStatus
 		var status string
 		if err := rows.Scan(&s.ID, &s.ShowID, &s.Label, &s.PricePaise, &status); err != nil {
-			return nil, fmt.Errorf("scan seat: %w", err)
+			return nil, dbError(err, "scan seat")
 		}
 		s.Status = SeatStatus(status)
 		seats = append(seats, s)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("list seats for show %d: %w", showID, err)
+		return nil, dbError(err, "list seats for show %d", showID)
 	}
 	return seats, nil
 }
@@ -202,7 +223,7 @@ func mapInsertBookingError(err error) error {
 			return ErrSeatNotInShow
 		}
 	}
-	return fmt.Errorf("insert booking: %w", err)
+	return dbError(err, "insert booking")
 }
 
 // GetBooking returns one booking, or ErrBookingNotFound.
@@ -220,7 +241,7 @@ func (r *PostgresRepository) GetBooking(ctx context.Context, bookingID int64) (B
 		return Booking{}, ErrBookingNotFound
 	}
 	if err != nil {
-		return Booking{}, fmt.Errorf("get booking %d: %w", bookingID, err)
+		return Booking{}, dbError(err, "get booking %d", bookingID)
 	}
 	return b, nil
 }

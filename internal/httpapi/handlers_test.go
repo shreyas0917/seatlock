@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -175,6 +176,18 @@ func TestCreateBooking_500HidesInternalError(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 	assert.Equal(t, "INTERNAL_ERROR", decodeErrorCode(t, rec))
 	assert.NotContains(t, rec.Body.String(), "db-prod-1", "raw database errors must never reach the client")
+}
+
+func TestCreateBooking_503ServiceBusy(t *testing.T) {
+	// Simulate the repository timing out (slow query or no free pool connection).
+	busy := fmt.Errorf("insert booking: %w: %w", booking.ErrBusy, context.DeadlineExceeded)
+	router := newTestRouter(&stubRepository{createErr: busy}, stubPinger{})
+
+	rec := postBooking(t, router, "alice", `{"show_id": 1, "seat_id": 7}`)
+
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	assert.Equal(t, "SERVICE_BUSY", decodeErrorCode(t, rec))
+	assert.Equal(t, "1", rec.Header().Get("Retry-After"))
 }
 
 func TestListSeats(t *testing.T) {

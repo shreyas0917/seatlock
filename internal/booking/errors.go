@@ -31,6 +31,11 @@ var (
 	// ErrBookingNotFound: no booking with that ID exists.
 	ErrBookingNotFound = errors.New("booking not found")
 
+	// ErrBusy: the database did not answer in time. Either a query was slow, or
+	// every pooled connection was in use and we timed out waiting for one.
+	// Mapped to 503 SERVICE_BUSY (see internal/httpapi/errors.go for why).
+	ErrBusy = errors.New("service busy")
+
 	// ErrSeatAlreadyBooked: someone else already booked this seat. Produced
 	// when PostgreSQL rejects the insert with a unique-constraint violation
 	// (error code 23505) on bookings_show_seat_unique.
