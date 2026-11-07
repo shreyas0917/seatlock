@@ -62,7 +62,7 @@ func setupTestDB(t *testing.T) testFixture {
 	t.Cleanup(pool.Close)
 
 	// Clean setup: empty all tables and restart ID counters.
-	_, err = pool.Exec(ctx, `TRUNCATE bookings, seats, shows RESTART IDENTITY CASCADE`)
+	_, err = pool.Exec(ctx, `TRUNCATE bookings, holds, seats, shows RESTART IDENTITY CASCADE`)
 	require.NoError(t, err)
 
 	var showID int64

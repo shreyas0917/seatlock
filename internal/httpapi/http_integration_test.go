@@ -59,7 +59,7 @@ func TestHTTP_ParallelBurstHasNo500s(t *testing.T) {
 	t.Logf("pool: max_conns=%d min_conns=%d", defaults.DBMaxConns, defaults.DBMinConns)
 
 	// Fresh data: one show with one seat.
-	_, err = pool.Exec(ctx, `TRUNCATE bookings, seats, shows RESTART IDENTITY CASCADE`)
+	_, err = pool.Exec(ctx, `TRUNCATE bookings, holds, seats, shows RESTART IDENTITY CASCADE`)
 	require.NoError(t, err)
 	var showID, seatID int64
 	require.NoError(t, pool.QueryRow(ctx, `

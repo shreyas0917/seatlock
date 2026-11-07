@@ -28,6 +28,7 @@ const (
 const (
 	constraintBookingsShowSeatUnique = "bookings_show_seat_unique"
 	constraintBookingsSeatFK         = "bookings_seat_fk"
+	constraintHoldsSeatFK            = "holds_seat_fk"
 )
 
 // defaultQueryTimeout caps how long any single query may take. If Postgres is
@@ -194,14 +195,38 @@ func (r *PostgresRepository) CreateBooking(ctx context.Context, in BookSeatInput
 	ctx, cancel := context.WithTimeout(ctx, r.queryTimeout)
 	defer cancel()
 
+	// TEMPORARY (removed when POST /v1/bookings becomes confirm-only):
+	// migration 0002 requires every booking to reference a hold. Until the
+	// hold -> confirm flow is wired, a direct booking records an instantly
+	// CONSUMED hold in the same transaction, so the old flow keeps working.
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return Booking{}, dbError(err, "begin create booking")
+	}
+	defer tx.Rollback(ctx) // no-op after a successful Commit
+
+	var holdID int64
+	err = tx.QueryRow(ctx, `
+		INSERT INTO holds (show_id, seat_id, user_id, status, expires_at)
+		VALUES ($1, $2, $3, 'CONSUMED', NOW())
+		RETURNING id`,
+		in.ShowID, in.SeatID, in.UserID).Scan(&holdID)
+	if err != nil {
+		return Booking{}, mapInsertBookingError(err)
+	}
+
 	var b Booking
-	err := r.pool.QueryRow(ctx, `
-		INSERT INTO bookings (show_id, seat_id, user_id)
-		VALUES ($1, $2, $3)
+	err = tx.QueryRow(ctx, `
+		INSERT INTO bookings (show_id, seat_id, user_id, hold_id)
+		VALUES ($1, $2, $3, $4)
 		RETURNING id, show_id, seat_id, user_id, created_at`,
-		in.ShowID, in.SeatID, in.UserID).
+		in.ShowID, in.SeatID, in.UserID, holdID).
 		Scan(&b.ID, &b.ShowID, &b.SeatID, &b.UserID, &b.CreatedAt)
 	if err != nil {
+		return Booking{}, mapInsertBookingError(err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
 		return Booking{}, mapInsertBookingError(err)
 	}
 	return b, nil
@@ -218,7 +243,8 @@ func mapInsertBookingError(err error) error {
 		switch {
 		case pgErr.Code == pgUniqueViolation && pgErr.ConstraintName == constraintBookingsShowSeatUnique:
 			return ErrSeatAlreadyBooked
-		case pgErr.Code == pgForeignKeyViolation && pgErr.ConstraintName == constraintBookingsSeatFK:
+		case pgErr.Code == pgForeignKeyViolation &&
+			(pgErr.ConstraintName == constraintBookingsSeatFK || pgErr.ConstraintName == constraintHoldsSeatFK):
 			// The service already checks this; the database check is the backstop.
 			return ErrSeatNotInShow
 		}
