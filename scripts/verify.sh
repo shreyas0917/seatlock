@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # verify.sh - the ONE command that decides whether the code may be pushed.
 #
-#   gofmt (must list no files) -> go vet -> unit tests -> integration tests
+#   gofmt (must list no files) -> go vet -> monitoring config (promtool)
+#   -> unit tests -> integration tests
 #
 # Every line of output is also saved, UNFILTERED, to tmp/verify-<timestamp>.log
 # (tmp/ is gitignored). Rule: only push when this script exits 0. When it
@@ -42,6 +43,26 @@ step "go vet"
 go vet ./...
 go vet -tags=integration ./...
 echo "ok"
+
+step "monitoring config: promtool check config / check rules / test rules"
+# Same Prometheus image as docker-compose.yml, so promtool matches the server.
+PROM_IMAGE="$(grep -oE 'prom/prometheus:v[0-9.]+' docker-compose.yml | head -n 1)"
+if docker info > /dev/null 2>&1; then
+  # Git Bash on Windows needs a Windows path for the volume and must not
+  # rewrite "/etc/..." arguments; on Linux (CI) plain pwd is used.
+  MON="$(pwd -W 2> /dev/null || pwd)/monitoring"
+  export MSYS_NO_PATHCONV=1
+  docker run --rm --entrypoint promtool -v "$MON:/etc/prometheus:ro" "$PROM_IMAGE" check config /etc/prometheus/prometheus.yml
+  docker run --rm --entrypoint promtool -v "$MON:/etc/prometheus:ro" "$PROM_IMAGE" check rules /etc/prometheus/alerts.yml
+  docker run --rm --entrypoint promtool -w /etc/prometheus -v "$MON:/etc/prometheus:ro" "$PROM_IMAGE" test rules alerts_test.yml
+  unset MSYS_NO_PATHCONV
+elif [ "${CI:-}" = "true" ]; then
+  echo "Docker is required for the promtool checks in CI"
+  false
+else
+  echo "SKIPPED: Docker is not available here (CI always runs these checks)"
+fi
+echo "(the dashboard JSON is validated by the Go test in monitoring/)"
 
 step "unit tests"
 make test TEST_FLAGS="${TEST_FLAGS:-}"
