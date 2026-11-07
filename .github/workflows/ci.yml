@@ -5,7 +5,7 @@
 #
 # On Linux, cgo is available, so tests also run with -race (the Go race
 # detector), which cannot run on the Windows development machine.
-# Full CI with load tests comes in Phase 7.
+# The k6 load smoke test runs in its own workflow (load-smoke.yml).
 name: CI
 
 on:

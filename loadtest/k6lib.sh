@@ -118,6 +118,11 @@ correctness_checks() {
   else fail "verify.sql: only $zero of $checks checks returned 0 rows (see $run.verify.txt)"; fi
 
   # 5. Prometheus: an invariant run that finished after these checks began
+  # (skipped with NO_PROM=1: the CI smoke test runs without Prometheus).
+  if [ -n "${NO_PROM:-}" ]; then
+    echo "  SKIP: Prometheus invariant gauges (NO_PROM=1; verify.sql above runs the same checks)"
+    return
+  fi
   fresh=""
   for _ in $(seq 1 30); do
     last="$(prom_value 'min(seatlock_invariant_last_success_timestamp_seconds)')"

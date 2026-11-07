@@ -1,0 +1,46 @@
+# Load smoke: a small k6 rush against the real Compose stack, on every push
+# to main and every pull request. It FAILS the build on any double booking
+# or invariant violation:
+#
+#   200 booking attempts on 20 seats -> exactly 20 bookings, 0 unexpected
+#   statuses, gateway charges == bookings + refunds, verify.sql 0 rows.
+#
+# The same script runs locally with `VERIFY_LOAD=1 scripts/verify.sh`.
+# A separate workflow (not a job in ci.yml) so it has its own README badge.
+name: Load smoke
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # Prometheus and Grafana are not needed: verify.sql runs the same
+      # invariant checks directly.
+      - name: Start the stack (postgres, redis, payment mock, api, worker)
+        run: docker compose up -d --build --wait postgres redis payment api worker
+
+      - name: k6 smoke test (200 booking attempts on 20 seats)
+        run: ./loadtest/smoke.sh
+
+      - name: Container logs (on failure)
+        if: failure()
+        run: docker compose logs --no-color --tail 200
+
+      - name: Upload k6 results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: load-smoke
+          path: tmp/loadtest/

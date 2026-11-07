@@ -17,6 +17,9 @@
 #
 # Usage:  scripts/verify.sh                    (needs `make up` for integration tests)
 #         TEST_FLAGS=-race scripts/verify.sh   (race detector; needs cgo, used in CI)
+#         VERIFY_LOAD=1 scripts/verify.sh      (+ the k6 smoke test, ~1 min; needs
+#                                               `make up`. CI runs it in its own
+#                                               "Load smoke" workflow)
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -69,6 +72,13 @@ make test TEST_FLAGS="${TEST_FLAGS:-}"
 
 step "integration tests"
 make test-integration TEST_FLAGS="${TEST_FLAGS:-}"
+
+if [ "${VERIFY_LOAD:-}" = "1" ]; then
+  step "k6 smoke test: 200 booking attempts on 20 seats (loadtest/smoke.sh)"
+  ./loadtest/smoke.sh
+else
+  step "k6 smoke test: SKIPPED (set VERIFY_LOAD=1; CI always runs it)"
+fi
 
 echo
 echo "VERIFY OK (full log: $LOG)"

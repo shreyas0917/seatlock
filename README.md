@@ -1,6 +1,6 @@
 # SeatLock
 
-[![CI](https://github.com/shreyas0917/seatlock/actions/workflows/ci.yml/badge.svg)](https://github.com/shreyas0917/seatlock/actions/workflows/ci.yml)
+[![CI](https://github.com/shreyas0917/seatlock/actions/workflows/ci.yml/badge.svg)](https://github.com/shreyas0917/seatlock/actions/workflows/ci.yml) [![Load smoke](https://github.com/shreyas0917/seatlock/actions/workflows/load-smoke.yml/badge.svg)](https://github.com/shreyas0917/seatlock/actions/workflows/load-smoke.yml)
 
 **A high-concurrency ticket booking backend in Go that guarantees a seat can never be sold twice, a card is never charged twice, and money taken for a seat that wasn't sold always comes back, even when 50 users click at once, when Redis fails, and when a server crashes mid-payment.**
 
