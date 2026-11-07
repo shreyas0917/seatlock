@@ -55,7 +55,7 @@ available_seats() {
 
 # sql "QUERY"  - runs one SQL query and prints the bare result.
 sql() {
-  docker compose exec -T postgres psql -U "$PG_USER" -d "$PG_DB" -tAc "$1"
+  docker compose exec -T postgres psql -q -U "$PG_USER" -d "$PG_DB" -tAc "$1"
 }
 
 # expect_sql "QUERY" WANT DESCRIPTION  - checks a single-value SQL result.
@@ -94,6 +94,37 @@ expect_mock() {
   local got
   got="$(mock_stat "$1")"
   if [ "$got" = "$2" ]; then pass "$3 ($1 = $got)"; else fail "$3: expected $1 = $2, got '$got'"; fi
+}
+
+# require_demo_mode - the worker demos need the short timings of
+# docker-compose.demo.yml (`make up-demo`); stop with a clear hint otherwise.
+require_demo_mode() {
+  if [ "$(docker compose exec -T worker printenv DEMO_MODE 2>/dev/null | tr -d '[:space:]')" != "true" ]; then
+    echo "This demo needs the short demo timings. Start the stack with:  make up-demo"
+    exit 2
+  fi
+}
+
+# wait_for "SQL" WANT TIMEOUT_SECONDS DESCRIPTION - polls a single-value SQL
+# query once per second until it returns WANT. Prints how long it took.
+wait_for() {
+  local query="$1" want="$2" limit="$3" what="$4" got waited=0
+  while [ "$waited" -lt "$limit" ]; do
+    got="$(sql "$query" | tr -d '[:space:]')"
+    if [ "$got" = "$want" ]; then
+      pass "$what = $want (after ${waited}s)"
+      return 0
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  fail "$what: expected $want within ${limit}s, last value '$got'"
+  return 1
+}
+
+# redis_has KEY - prints 1 if the key exists in Redis (app database 0), else 0.
+redis_has() {
+  docker compose exec -T redis redis-cli exists "$1" | tr -d '[:space:]'
 }
 
 # run_verify - runs demo/verify.sql. Every check in it must return 0 rows.

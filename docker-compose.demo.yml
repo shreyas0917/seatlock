@@ -1,0 +1,35 @@
+# docker-compose.demo.yml - SHORT timings so the worker demos finish in about
+# a minute. Used ONLY by the demo scripts, via `make up-demo`:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.demo.yml up -d --build --wait
+#
+# `make up` goes back to the normal timings. Tests and CI never use this file.
+#
+# The values still pass the worker's startup safety checks (ValidateWorker):
+#   RECONCILE_AFTER 15s  > PAYMENT_TIMEOUT 3s + IDEMPOTENCY_LEASE 5s
+#   PENDING_HOLD_MAX 30s > RECONCILE_AFTER 15s
+#   RECONCILE_LEASE 10s  > 2 x PAYMENT_TIMEOUT + DB_QUERY_TIMEOUT (9s)
+#   OUTBOX_LEASE 8s      > PAYMENT_TIMEOUT + DB_QUERY_TIMEOUT (6s)
+
+x-demo-env: &demo-env
+  DEMO_MODE: "true"            # lets the demo scripts check they run in demo mode
+  HOLD_TTL: 20s                # holds last 20s (Redis lock 30s)
+  PAYMENT_TIMEOUT: 3s
+  IDEMPOTENCY_LEASE: 5s
+  PENDING_HOLD_MAX: 30s
+  WORKER_BATCH_SIZE: 3         # small batches, so a backlog takes several runs
+  RECONCILE_AFTER: 15s
+  RECONCILE_INTERVAL: 3s
+  RECONCILE_LEASE: 10s
+  OUTBOX_INTERVAL: 1s
+  OUTBOX_LEASE: 8s
+  EXPIRE_INTERVAL: 2s
+
+services:
+  api:
+    environment: *demo-env
+  worker:
+    environment: *demo-env
+  payment:
+    environment:
+      PAYMENT_SLOW_DELAY: 2s   # a "slow" charge must stay under PAYMENT_TIMEOUT (3s)

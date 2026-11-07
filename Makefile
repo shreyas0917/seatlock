@@ -10,11 +10,17 @@ SWAG_VERSION  := v1.16.4
 # Extra flags for go test, e.g. `make test TEST_FLAGS=-race` (CI does this on Linux).
 TEST_FLAGS    ?=
 
-.PHONY: up down logs run test test-integration verify migrate-up migrate-down seed reset-data swagger lint
+.PHONY: up up-demo down logs run test test-integration verify migrate-up migrate-down seed reset-data outbox-retry swagger lint
 
 ## up: build the API image and start postgres, redis and api in the background
 up:
 	docker compose up -d --build --wait
+
+## up-demo: like `up`, but with the SHORT timings of docker-compose.demo.yml
+##          (20s holds, worker every few seconds). Needed by the worker demos.
+##          `make up` switches back to the normal timings.
+up-demo:
+	docker compose -f docker-compose.yml -f docker-compose.demo.yml up -d --build --wait
 
 ## down: stop all containers (data volume is kept; use `docker compose down -v` to wipe it)
 down:
@@ -60,6 +66,13 @@ seed:
 reset-data:
 	docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U $(POSTGRES_USER) -d $(POSTGRES_DB) -c "TRUNCATE bookings, payments, holds, outbox, idempotency_keys RESTART IDENTITY"
 	docker compose exec -T redis sh -c "redis-cli --scan --pattern 'seat:*' | xargs -r redis-cli del"
+
+## outbox-retry: put ONE dead-lettered (FAILED) outbox row back in the queue,
+##               after fixing its cause:  make outbox-retry ID=42
+##               (the same SQL as booking.PostgresRepository.RequeueOutbox)
+outbox-retry:
+	@test -n "$(ID)" || (echo "usage: make outbox-retry ID=<outbox id>"; exit 1)
+	docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U $(POSTGRES_USER) -d $(POSTGRES_DB) -c "UPDATE outbox SET status = 'PENDING', attempts = 0, next_attempt_at = NOW() WHERE id = $(ID) AND status = 'FAILED' RETURNING id, kind, status"
 
 ## swagger: regenerate the OpenAPI docs in ./docs from the handler annotations
 ##          (needs the swag CLI once: go install github.com/swaggo/swag/cmd/swag@v1.16.4)

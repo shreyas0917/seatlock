@@ -30,7 +30,7 @@ expect_status 201 "hold"
 HOLD="$(json_field hold_id)"
 
 echo
-echo "Step 2: the gateway takes the money but the answer is lost (waiting for the 5s timeout ...)"
+echo "Step 2: the gateway takes the money but the answer is lost (waiting for the payment timeout ...)"
 mock_queue timeout
 request POST /v1/bookings "$USER1" "{\"hold_id\": $HOLD}" "$KEY"
 echo "  $BODY"
