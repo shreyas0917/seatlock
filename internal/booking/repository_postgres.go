@@ -14,6 +14,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -47,15 +48,56 @@ const (
 //   - the query never started, because all pool connections were busy and we
 //     ran out of time WAITING for one (pool acquire uses the same ctx).
 //
+// The same goes for Postgres being UNAVAILABLE for a moment (a restart, a
+// failover, a dropped connection): see IsDBUnavailable.
+//
 // Those become ErrBusy. fmt.Errorf with two %w verbs wraps BOTH errors, so
 // errors.Is(err, ErrBusy) is true for the HTTP layer AND the original pgx
 // error is still there for the logs.
 func dbError(err error, format string, args ...any) error {
 	op := fmt.Sprintf(format, args...)
-	if errors.Is(err, context.DeadlineExceeded) || pgconn.Timeout(err) {
+	if IsDBUnavailable(err) {
 		return fmt.Errorf("%s: %w: %w", op, ErrBusy, err)
 	}
 	return fmt.Errorf("%s: %w", op, err)
+}
+
+// IsDBUnavailable reports whether err means "Postgres could not serve this
+// request RIGHT NOW", a temporary condition where the same request will
+// probably succeed in a moment (503 SERVICE_BUSY), as opposed to a bug (500):
+//
+//   - a timeout: the query was too slow, or no pool connection was free in time;
+//   - no connection could be made: Postgres is restarting ("the database
+//     system is shutting down"), refusing connections, or its name does not
+//     resolve yet (*pgconn.ConnectError);
+//   - Postgres ended the session or cannot take it: SQLSTATE class 57
+//     (57P01 admin_shutdown, 57P02 crash_shutdown, 57P03 cannot_connect_now),
+//     class 08 (connection exception), class 53 (insufficient resources, e.g.
+//     too many connections);
+//   - the connection broke mid-query (connection reset: a network error).
+//
+// Found by chaos/postgres-restart.sh: before this, a Postgres restart under
+// load gave clients 132 x 500 INTERNAL_ERROR in 3 seconds instead of 503.
+// Data was never wrong; the status was. Exported so the idempotency store
+// applies the same rule.
+func IsDBUnavailable(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) || pgconn.Timeout(err) {
+		return true
+	}
+	var connectErr *pgconn.ConnectError
+	if errors.As(err, &connectErr) {
+		return true
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		class := pgErr.Code[:min(2, len(pgErr.Code))]
+		return class == "57" || class == "08" || class == "53"
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr)
 }
 
 // PostgresRepository implements Repository using PostgreSQL.

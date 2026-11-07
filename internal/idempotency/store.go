@@ -28,7 +28,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/shreyas0917/seatlock/internal/booking"
@@ -262,10 +261,11 @@ func newToken() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-// storeError wraps database errors; timeouts become booking.ErrBusy (503),
-// exactly like in the booking repository.
+// storeError wraps database errors; timeouts and a briefly unavailable
+// Postgres become booking.ErrBusy (503), by the SAME rule as the booking
+// repository (booking.IsDBUnavailable).
 func storeError(err error, op string) error {
-	if errors.Is(err, context.DeadlineExceeded) || pgconn.Timeout(err) {
+	if booking.IsDBUnavailable(err) {
 		return fmt.Errorf("%s: %w: %w", op, booking.ErrBusy, err)
 	}
 	return fmt.Errorf("%s: %w", op, err)

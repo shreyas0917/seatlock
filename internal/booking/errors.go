@@ -34,8 +34,10 @@ var (
 	// ErrBookingNotFound: no booking with that ID exists.
 	ErrBookingNotFound = errors.New("booking not found")
 
-	// ErrBusy: the database did not answer in time. Either a query was slow, or
-	// every pooled connection was in use and we timed out waiting for one.
+	// ErrBusy: the database could not serve the request right now. A query was
+	// slow, every pooled connection was in use and we timed out waiting for
+	// one, or Postgres was briefly unavailable (restart, dropped connection):
+	// see IsDBUnavailable.
 	// Mapped to 503 SERVICE_BUSY (see internal/httpapi/errors.go for why).
 	ErrBusy = errors.New("service busy")
 
