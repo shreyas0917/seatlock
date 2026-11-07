@@ -4,6 +4,8 @@
 
 API_URL="${API_URL:-http://localhost:8080}"
 MOCK_URL="${MOCK_URL:-http://localhost:8095}"   # the mock payment gateway
+PROM_URL="${PROM_URL:-http://localhost:9095}"   # Prometheus
+GRAFANA_URL="${GRAFANA_URL:-http://localhost:3001}"
 SHOW_ID="${SHOW_ID:-1}"
 PG_USER="${POSTGRES_USER:-seatlock}"
 PG_DB="${POSTGRES_DB:-seatlock}"
@@ -125,6 +127,26 @@ wait_for() {
 # redis_has KEY - prints 1 if the key exists in Redis (app database 0), else 0.
 redis_has() {
   docker compose exec -T redis redis-cli exists "$1" | tr -d '[:space:]'
+}
+
+# prom_value "PROMQL" - prints the value of the FIRST series of an instant
+# query ("" if the result is empty). No jq needed.
+prom_value() {
+  curl -fsS -G "$PROM_URL/api/v1/query" --data-urlencode "query=$1" \
+    | grep -oE '"value":\[[0-9.e+]+,"[^"]*"\]' | head -n 1 | sed -E 's/.*,"([^"]*)"\]/\1/'
+}
+
+# expect_prom "PROMQL" OP WANT DESCRIPTION - compares a query's value with
+# WANT using OP (-eq, -ge, ...). Values are rounded down to whole numbers.
+expect_prom() {
+  local got
+  got="$(prom_value "$1")"
+  got="${got%%.*}"
+  if [ -n "$got" ] && [ "$got" "$2" "$3" ]; then
+    pass "$4 ($got)"
+  else
+    fail "$4: expected $2 $3, got '${got:-no data}'  [query: $1]"
+  fi
 }
 
 # run_verify - runs demo/verify.sql. Every check in it must return 0 rows.
