@@ -10,7 +10,7 @@ SWAG_VERSION  := v1.16.4
 # Extra flags for go test, e.g. `make test TEST_FLAGS=-race` (CI does this on Linux).
 TEST_FLAGS    ?=
 
-.PHONY: up up-demo down logs run test test-integration verify verify-sql migrate-up migrate-down seed reset-data outbox-retry swagger lint
+.PHONY: up up-demo up-bench seed-load down logs run test test-integration verify verify-sql migrate-up migrate-down seed reset-data outbox-retry swagger lint
 
 ## up: build the API image and start postgres, redis and api in the background
 up:
@@ -21,6 +21,11 @@ up:
 ##          `make up` switches back to the normal timings.
 up-demo:
 	docker compose -f docker-compose.yml -f docker-compose.demo.yml up -d --build --wait
+
+## up-bench: like `up`, with docker-compose.bench.yml (mock gateway answers in
+##           50-150 ms, everything else normal). Used for the load tests.
+up-bench:
+	docker compose -f docker-compose.yml -f docker-compose.bench.yml up -d --build --wait
 
 ## down: stop all containers (data volume is kept; use `docker compose down -v` to wipe it)
 down:
@@ -59,6 +64,11 @@ migrate-down:
 ## seed: load demo data (safe to run more than once)
 seed:
 	docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U $(POSTGRES_USER) -d $(POSTGRES_DB) < db/seed/seed.sql
+
+## seed-load: load-test data: a 100-seat rush show, a 20-seat smoke show and
+##            200 shows x 200 seats (safe to run more than once)
+seed-load:
+	docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U $(POSTGRES_USER) -d $(POSTGRES_DB) < db/seed/load.sql
 
 ## reset-data: delete all bookings, holds, payments, outbox rows and idempotency keys
 ##             (keeps shows and seats) AND the Redis seat locks, so the demos have

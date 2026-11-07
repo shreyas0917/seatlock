@@ -127,8 +127,14 @@ type Server struct {
 	chargeRequests map[string]int
 	queue          []string // behaviours for the next charges, oldest first
 	refundFailures int      // how many upcoming refunds must fail (refund_fail)
-	nextID         int
-	rng            *rand.Rand
+	// slowUntil/slowDelay: a TIMED slowdown (POST /debug/slow), used by the
+	// chaos tests: until slowUntil, every new unforced charge waits slowDelay.
+	// Unlike restarting the mock with a new PAYMENT_MIN_DELAY, it keeps the
+	// in-memory charges and stats (the evidence for "no double charges").
+	slowUntil time.Time
+	slowDelay time.Duration
+	nextID    int
+	rng       *rand.Rand
 }
 
 // New creates a mock gateway.
@@ -151,6 +157,7 @@ func New(opts Options) *Server {
 	s.mux.HandleFunc("POST /charges/{key}/void", s.voidCharge)
 	s.mux.HandleFunc("POST /refunds", s.createRefund)
 	s.mux.HandleFunc("POST /debug/next-behavior", s.queueBehavior)
+	s.mux.HandleFunc("POST /debug/slow", s.slowFor)
 	s.mux.HandleFunc("POST /debug/reset", s.reset)
 	s.mux.HandleFunc("GET /debug/stats", s.stats)
 	s.mux.Handle("GET /metrics", s.metricsHandler())
@@ -171,6 +178,8 @@ func (s *Server) resetLocked() {
 	s.chargeRequests = map[string]int{}
 	s.queue = nil
 	s.refundFailures = 0
+	s.slowUntil = time.Time{}
+	s.slowDelay = 0
 }
 
 func (s *Server) createCharge(w http.ResponseWriter, r *http.Request) {
@@ -267,6 +276,9 @@ func (s *Server) pickBehaviorLocked(header string) string {
 }
 
 func (s *Server) randomDelayLocked() time.Duration {
+	if s.slowDelay > 0 && time.Now().Before(s.slowUntil) {
+		return s.slowDelay
+	}
 	if s.opts.MaxDelay <= s.opts.MinDelay {
 		return s.opts.MinDelay
 	}
@@ -376,6 +388,36 @@ func (s *Server) queueBehavior(w http.ResponseWriter, r *http.Request) {
 	queued := len(s.queue) + s.refundFailures
 	s.mu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]int{"queued": queued})
+}
+
+// slowFor handles POST /debug/slow {"delay":"3s","for":"60s"}: for the next
+// "for", every new unforced charge answers after "delay" (the charge itself
+// is still recorded first, like a slow real gateway). {"delay":"0s"} ends it.
+func (s *Server) slowFor(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Delay string `json:"delay"`
+		For   string `json:"for"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	delay, err1 := time.ParseDuration(req.Delay)
+	length, err2 := time.ParseDuration(req.For)
+	if err1 != nil || delay < 0 || (delay > 0 && (err2 != nil || length <= 0)) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": `want {"delay":"3s","for":"60s"} (delay "0s" ends a slowdown)`})
+		return
+	}
+	s.mu.Lock()
+	s.slowDelay = delay
+	s.slowUntil = time.Now().Add(length)
+	until := s.slowUntil
+	s.mu.Unlock()
+	if delay == 0 {
+		writeJSON(w, http.StatusOK, map[string]string{"slow": "off"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"delay": delay.String(), "until": until.UTC().Format(time.RFC3339)})
 }
 
 // reset handles POST /debug/reset: forget all charges, refunds, stats and

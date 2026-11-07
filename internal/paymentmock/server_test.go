@@ -132,6 +132,28 @@ func TestCharge_Slow(t *testing.T) {
 	assert.GreaterOrEqual(t, time.Since(start), 300*time.Millisecond)
 }
 
+// A timed slowdown applies to every new charge until it ends, then the
+// normal (here: zero) delay is back. Charges are still recorded.
+func TestSlowFor_SlowsChargesUntilItEnds(t *testing.T) {
+	mock, srv := newTestServer(t)
+	status, _ := post(t, srv.Client(), srv.URL+"/debug/slow", `{"delay":"200ms","for":"400ms"}`, "")
+	require.Equal(t, http.StatusOK, status)
+
+	start := time.Now()
+	_, out := post(t, srv.Client(), srv.URL+"/charges", `{"idempotency_key":"sf-1","amount_paise":1}`, "")
+	assert.Equal(t, StatusSucceeded, out["status"])
+	assert.GreaterOrEqual(t, time.Since(start), 200*time.Millisecond, "slowed down")
+
+	time.Sleep(450 * time.Millisecond) // the slowdown is over
+	start = time.Now()
+	post(t, srv.Client(), srv.URL+"/charges", `{"idempotency_key":"sf-2","amount_paise":1}`, "")
+	assert.Less(t, time.Since(start), 150*time.Millisecond, "back to normal")
+	assert.Equal(t, 2, mock.Stats().TotalCharges)
+
+	status, _ = post(t, srv.Client(), srv.URL+"/debug/slow", `{"delay":"oops"}`, "")
+	assert.Equal(t, http.StatusBadRequest, status)
+}
+
 func TestRefund_IsIdempotent(t *testing.T) {
 	mock, srv := newTestServer(t)
 	_, charge := post(t, srv.Client(), srv.URL+"/charges", `{"idempotency_key":"pay-1","amount_paise":25000}`, "")

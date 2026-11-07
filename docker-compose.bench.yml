@@ -1,0 +1,16 @@
+# Benchmark settings, layered on docker-compose.yml by `make up-bench`:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.bench.yml up -d
+#
+# Only ONE thing changes: the mock gateway answers after a realistic random
+# 50-150 ms (a real payment API is never instant), so confirms carry real
+# latency and hold their DB connection / Redis lock for a realistic time.
+# Every SeatLock setting (pools, timeouts, HOLD_TTL, worker intervals) keeps
+# its normal value, so the numbers describe the normal configuration.
+# `make up` switches back (0 ms gateway delay, as the demos expect).
+
+services:
+  payment:
+    environment:
+      PAYMENT_MIN_DELAY: 50ms
+      PAYMENT_MAX_DELAY: 150ms
