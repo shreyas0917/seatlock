@@ -17,9 +17,15 @@ import (
 	"github.com/shreyas0917/seatlock/internal/booking"
 )
 
-// StatusResponse is returned by /healthz and /readyz.
+// StatusResponse is returned by /healthz.
 type StatusResponse struct {
 	Status string `json:"status" example:"ok"`
+}
+
+// ReadinessResponse is returned by /readyz: the state of each dependency.
+type ReadinessResponse struct {
+	Postgres string `json:"postgres" example:"up" enums:"up,down"`
+	Redis    string `json:"redis" example:"up" enums:"up,down"`
 }
 
 // ErrorResponse is the single error shape used by every endpoint.
@@ -52,7 +58,7 @@ type SeatResponse struct {
 	ID         int64  `json:"id" example:"7"`
 	Label      string `json:"label" example:"A7"`
 	PricePaise int64  `json:"price_paise" example:"25000"`
-	Status     string `json:"status" example:"AVAILABLE" enums:"AVAILABLE,BOOKED"`
+	Status     string `json:"status" example:"AVAILABLE" enums:"AVAILABLE,HELD,BOOKED"`
 }
 
 // SeatMapResponse is the seat map of one show.
@@ -61,10 +67,26 @@ type SeatMapResponse struct {
 	Seats  []SeatResponse `json:"seats"`
 }
 
-// CreateBookingRequest is the body of POST /v1/bookings.
-type CreateBookingRequest struct {
+// CreateHoldRequest is the body of POST /v1/holds.
+type CreateHoldRequest struct {
 	ShowID int64 `json:"show_id" example:"1"`
 	SeatID int64 `json:"seat_id" example:"7"`
+}
+
+// HoldResponse is one hold.
+type HoldResponse struct {
+	HoldID      int64     `json:"hold_id" example:"12"`
+	ShowID      int64     `json:"show_id" example:"1"`
+	SeatID      int64     `json:"seat_id" example:"7"`
+	UserID      string    `json:"user_id" example:"user-42"`
+	Status      string    `json:"status" example:"ACTIVE" enums:"ACTIVE,CONSUMED,RELEASED,EXPIRED"`
+	ExpiresAt   time.Time `json:"expires_at" example:"2026-11-07T10:05:00Z"`
+	SecondsLeft int64     `json:"seconds_left" example:"300"`
+}
+
+// ConfirmBookingRequest is the body of POST /v1/bookings.
+type ConfirmBookingRequest struct {
+	HoldID int64 `json:"hold_id" example:"12"`
 }
 
 // BookingResponse is one booking.
@@ -73,6 +95,7 @@ type BookingResponse struct {
 	ShowID    int64     `json:"show_id" example:"1"`
 	SeatID    int64     `json:"seat_id" example:"7"`
 	UserID    string    `json:"user_id" example:"user-42"`
+	HoldID    int64     `json:"hold_id" example:"12"`
 	CreatedAt time.Time `json:"created_at" example:"2026-11-07T10:00:00Z"`
 }
 
@@ -85,5 +108,12 @@ func toSeatResponse(s booking.SeatWithStatus) SeatResponse {
 }
 
 func toBookingResponse(b booking.Booking) BookingResponse {
-	return BookingResponse{ID: b.ID, ShowID: b.ShowID, SeatID: b.SeatID, UserID: b.UserID, CreatedAt: b.CreatedAt}
+	return BookingResponse{ID: b.ID, ShowID: b.ShowID, SeatID: b.SeatID, UserID: b.UserID, HoldID: b.HoldID, CreatedAt: b.CreatedAt}
+}
+
+func toHoldResponse(h booking.Hold) HoldResponse {
+	return HoldResponse{
+		HoldID: h.ID, ShowID: h.ShowID, SeatID: h.SeatID, UserID: h.UserID,
+		Status: string(h.Status), ExpiresAt: h.ExpiresAt, SecondsLeft: h.SecondsLeft,
+	}
 }

@@ -1,8 +1,8 @@
 //go:build integration
 
 // repository_postgres_test.go tests the real SQL against the real PostgreSQL
-// started by docker compose, including THE CONCURRENCY PROOF:
-// 50 goroutines race for one seat and exactly one wins.
+// started by docker compose, including THE PHASE 1 CONCURRENCY PROOF:
+// 50 bookings race for one seat and the UNIQUE constraint lets exactly one win.
 //
 // The "//go:build integration" line at the top means this file is only
 // compiled when tests run with `-tags=integration` (make test-integration).
@@ -25,6 +25,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/shreyas0917/seatlock/internal/config"
 	"github.com/shreyas0917/seatlock/internal/db"
 )
 
@@ -41,6 +42,10 @@ type testFixture struct {
 
 // setupTestDB migrates the test database, wipes all rows, inserts fresh data,
 // and registers cleanup to run when the test ends.
+//
+// The pool uses the SAME default size as the real server (DB_MAX_CONNS /
+// DB_MIN_CONNS from internal/config), with no warm-up, so the tests see the
+// same connection pressure production would.
 func setupTestDB(t *testing.T) testFixture {
 	// t.Helper marks this as a helper, so failures point at the calling test line.
 	t.Helper()
@@ -52,11 +57,9 @@ func setupTestDB(t *testing.T) testFixture {
 	}
 	require.NoError(t, db.MigrateUp(url), "is postgres running? try `make up`")
 
-	// A larger pool than default so 50 goroutines can really hit Postgres at once.
-	cfg, err := pgxpool.ParseConfig(url)
+	defaults, err := config.Load()
 	require.NoError(t, err)
-	cfg.MaxConns = 60
-	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	pool, err := db.NewPool(ctx, url, defaults.DBMaxConns, defaults.DBMinConns)
 	require.NoError(t, err)
 	// t.Cleanup runs after the test finishes (pass or fail), like defer for tests.
 	t.Cleanup(pool.Close)
@@ -85,57 +88,87 @@ func setupTestDB(t *testing.T) testFixture {
 	return testFixture{pool: pool, repo: NewPostgresRepository(pool), showID: showID, seatIDs: seatIDs}
 }
 
-// warmUpPool makes the pool open n connections now: it borrows n at once,
-// then gives them all back. They stay open in the pool, ready to use.
-func warmUpPool(t *testing.T, pool *pgxpool.Pool, n int) {
+// bookSeat books a seat the only way that exists now: hold, then confirm.
+func bookSeat(t *testing.T, f testFixture, userID string, seatID int64) Booking {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	conns := make([]*pgxpool.Conn, 0, n)
-	for i := 0; i < n; i++ {
-		conn, err := pool.Acquire(ctx)
-		require.NoError(t, err)
-		conns = append(conns, conn)
-	}
-	for _, conn := range conns {
-		conn.Release()
-	}
+	ctx := context.Background()
+	h, _, err := f.repo.CreateHold(ctx, HoldSeatInput{UserID: userID, ShowID: f.showID, SeatID: seatID}, testHoldTTL)
+	require.NoError(t, err)
+	b, err := f.repo.ConfirmHold(ctx, ConfirmInput{UserID: userID, HoldID: h.ID})
+	require.NoError(t, err)
+	return b
 }
 
-func TestPostgres_CreateAndGetBooking(t *testing.T) {
-	f := setupTestDB(t)
-	ctx := context.Background()
+// insertConsumedHold writes a CONSUMED hold row directly with SQL. Several
+// CONSUMED holds may exist for one seat (the partial unique index only covers
+// ACTIVE ones). That lets the tests below aim many bookings at one seat and
+// prove the bookings table's own UNIQUE constraint still guards it.
+func insertConsumedHold(t *testing.T, f testFixture, userID string, seatID int64) int64 {
+	t.Helper()
+	var id int64
+	require.NoError(t, f.pool.QueryRow(context.Background(), `
+		INSERT INTO holds (show_id, seat_id, user_id, status, expires_at)
+		VALUES ($1, $2, $3, 'CONSUMED', NOW()) RETURNING id`, f.showID, seatID, userID).Scan(&id))
+	return id
+}
 
-	created, err := f.repo.CreateBooking(ctx, BookSeatInput{UserID: "alice", ShowID: f.showID, SeatID: f.seatIDs[0]})
-	require.NoError(t, err)
+// insertBooking runs the same INSERT as ConfirmHold and maps its errors the
+// same way, but without the hold checks in front of it.
+func insertBooking(f testFixture, userID string, showID, seatID, holdID int64) error {
+	_, err := f.pool.Exec(context.Background(), `
+		INSERT INTO bookings (show_id, seat_id, user_id, hold_id) VALUES ($1, $2, $3, $4)`,
+		showID, seatID, userID, holdID)
+	if err != nil {
+		return mapInsertBookingError(err)
+	}
+	return nil
+}
+
+func TestPostgres_BookAndGetBooking(t *testing.T) {
+	f := setupTestDB(t)
+
+	created := bookSeat(t, f, "alice", f.seatIDs[0])
 	assert.NotZero(t, created.ID)
 	assert.WithinDuration(t, time.Now(), created.CreatedAt, time.Minute)
 
-	got, err := f.repo.GetBooking(ctx, created.ID)
+	got, err := f.repo.GetBooking(context.Background(), created.ID)
 	require.NoError(t, err)
 	assert.Equal(t, created.ID, got.ID)
+	assert.Equal(t, created.HoldID, got.HoldID)
 	assert.Equal(t, "alice", got.UserID)
 }
 
-func TestPostgres_DuplicateBookingReturnsErrSeatAlreadyBooked(t *testing.T) {
+// The Phase 1 safety net still holds: even if a second booking for a booked
+// seat got past every hold check, bookings_show_seat_unique (23505) stops it.
+func TestPostgres_SecondBookingForSeatReturnsErrSeatAlreadyBooked(t *testing.T) {
 	f := setupTestDB(t)
-	ctx := context.Background()
+	bookSeat(t, f, "alice", f.seatIDs[0])
+	bobHold := insertConsumedHold(t, f, "bob", f.seatIDs[0])
 
-	_, err := f.repo.CreateBooking(ctx, BookSeatInput{UserID: "alice", ShowID: f.showID, SeatID: f.seatIDs[0]})
-	require.NoError(t, err)
+	err := insertBooking(f, "bob", f.showID, f.seatIDs[0], bobHold)
 
-	_, err = f.repo.CreateBooking(ctx, BookSeatInput{UserID: "bob", ShowID: f.showID, SeatID: f.seatIDs[0]})
 	assert.ErrorIs(t, err, ErrSeatAlreadyBooked)
+}
+
+// A hold can produce only one booking (bookings_hold_unique).
+func TestPostgres_SecondBookingFromSameHoldReturnsErrHoldAlreadyUsed(t *testing.T) {
+	f := setupTestDB(t)
+	b := bookSeat(t, f, "alice", f.seatIDs[0])
+
+	// Same hold, different seat: only the hold_id constraint can catch this.
+	err := insertBooking(f, "alice", f.showID, f.seatIDs[1], b.HoldID)
+
+	assert.ErrorIs(t, err, ErrHoldAlreadyUsed)
 }
 
 func TestPostgres_ForeignKeyRejectsSeatFromAnotherShow(t *testing.T) {
 	f := setupTestDB(t)
-	ctx := context.Background()
+	holdID := insertConsumedHold(t, f, "alice", f.seatIDs[0])
 
-	// Bypass the service and insert a mismatched pair directly: the composite
-	// foreign key in the database must still refuse it.
-	_, err := f.repo.CreateBooking(ctx, BookSeatInput{UserID: "alice", ShowID: f.showID + 1000, SeatID: f.seatIDs[0]})
+	// Bypass the service and insert a mismatched (show, seat) pair directly:
+	// the composite foreign key in the database must still refuse it.
+	err := insertBooking(f, "alice", f.showID+1000, f.seatIDs[0], holdID)
+
 	assert.ErrorIs(t, err, ErrSeatNotInShow)
 }
 
@@ -160,8 +193,7 @@ func TestPostgres_ListShowsAndSeatMap(t *testing.T) {
 	require.Len(t, shows, 1)
 	assert.Equal(t, "Test Show", shows[0].Title)
 
-	_, err = f.repo.CreateBooking(ctx, BookSeatInput{UserID: "alice", ShowID: f.showID, SeatID: f.seatIDs[1]})
-	require.NoError(t, err)
+	bookSeat(t, f, "alice", f.seatIDs[1])
 
 	seats, err := f.repo.ListSeatsWithStatus(ctx, f.showID)
 	require.NoError(t, err)
@@ -173,14 +205,16 @@ func TestPostgres_ListShowsAndSeatMap(t *testing.T) {
 	assert.Equal(t, int64(25000), seats[1].PricePaise)
 }
 
-// TestConcurrentBookingSameSeat is THE CONCURRENCY PROOF.
+// TestConcurrentBookingSameSeat is THE PHASE 1 CONCURRENCY PROOF, kept in
+// Phase 2. It tests the LAST line of defence: the bookings table itself.
 //
-// Scenario: 50 users click "Book" on the same seat at the same instant.
-// Expected: exactly 1 succeeds, 49 get ErrSeatAlreadyBooked, and the bookings
-// table contains exactly 1 row for that seat. No double booking, ever.
+// Scenario: 50 bookings for the same seat are inserted at the same instant,
+// each from its own (consumed) hold, so none of the hold checks can stop
+// them. Expected: exactly 1 succeeds, 49 get ErrSeatAlreadyBooked, and the
+// bookings table contains exactly 1 row for that seat.
 //
-// It goes through the full Service (validation + repository + Postgres), the
-// same path a real HTTP request takes.
+// (The Phase 2 races through the full hold -> confirm flow with real Redis
+// are in service_integration_test.go: TestHoldRace and TestConfirmRace.)
 //
 // Go concepts used:
 //   - goroutine: `go func() {...}()` runs the function concurrently with the
@@ -193,18 +227,15 @@ func TestPostgres_ListShowsAndSeatMap(t *testing.T) {
 //     i.e. until every goroutine has finished.
 func TestConcurrentBookingSameSeat(t *testing.T) {
 	f := setupTestDB(t)
-	svc := NewService(f.repo, &fakeLocker{}, testHoldTTL)
 	ctx := context.Background()
 
 	const attempts = 50
 	targetSeat := f.seatIDs[0]
 
-	// Open all 50 database connections BEFORE the race. Otherwise every
-	// goroutine has to open a brand-new connection at the same instant, and
-	// on a slow machine (e.g. Docker Desktop) that handshake burst can eat the
-	// repository's 3s query timeout. We want to test the race inside
-	// Postgres, not how fast TCP connections open.
-	warmUpPool(t, f.pool, attempts)
+	holdIDs := make([]int64, attempts)
+	for i := range holdIDs {
+		holdIDs[i] = insertConsumedHold(t, f, fmt.Sprintf("user-%d", i), targetSeat)
+	}
 
 	start := make(chan struct{}) // the starting gun
 	var wg sync.WaitGroup
@@ -219,16 +250,11 @@ func TestConcurrentBookingSameSeat(t *testing.T) {
 			defer wg.Done()
 			<-start // wait here until the gun fires
 
-			_, err := svc.BookSeat(ctx, BookSeatInput{
-				UserID: fmt.Sprintf("user-%d", i), // 50 different users
-				ShowID: f.showID,
-				SeatID: targetSeat,
-			})
-			results[i] = err
+			results[i] = insertBooking(f, fmt.Sprintf("user-%d", i), f.showID, targetSeat, holdIDs[i])
 		}(i)
 	}
 
-	close(start) // fire! all 50 goroutines start booking at once
+	close(start) // fire! all 50 goroutines insert at once
 	wg.Wait()    // wait for all of them to finish
 
 	successes, conflicts := 0, 0

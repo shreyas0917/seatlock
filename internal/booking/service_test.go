@@ -102,23 +102,6 @@ func (f *fakeRepository) ListSeatsWithStatus(ctx context.Context, showID int64) 
 	return result, nil
 }
 
-// CreateBooking imitates the UNIQUE(show_id, seat_id) constraint: the check
-// and the insert happen while holding the lock, so they are atomic, just like
-// inside Postgres.
-func (f *fakeRepository) CreateBooking(ctx context.Context, in BookSeatInput) (Booking, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	for _, b := range f.bookings {
-		if b.ShowID == in.ShowID && b.SeatID == in.SeatID {
-			return Booking{}, ErrSeatAlreadyBooked
-		}
-	}
-	f.nextID++
-	b := Booking{ID: f.nextID, ShowID: in.ShowID, SeatID: in.SeatID, UserID: in.UserID, CreatedAt: time.Now()}
-	f.bookings[b.ID] = b
-	return b, nil
-}
-
 func (f *fakeRepository) GetBooking(ctx context.Context, bookingID int64) (Booking, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -227,64 +210,21 @@ func newTestService() (*Service, *fakeRepository, *fakeLocker) {
 	return NewService(repo, locker, 300*time.Second), repo, locker
 }
 
-func TestBookSeat_Success(t *testing.T) {
-	svc, _, _ := newTestService()
-
-	b, err := svc.BookSeat(context.Background(), BookSeatInput{UserID: "alice", ShowID: 1, SeatID: 1})
-
-	require.NoError(t, err)
-	assert.Equal(t, int64(1), b.ShowID)
-	assert.Equal(t, int64(1), b.SeatID)
-	assert.Equal(t, "alice", b.UserID)
-}
-
-// TestBookSeat_ValidationErrors is a "table-driven test": a list of cases run
-// by one loop. Each case runs as a named subtest via t.Run, so a failure says
-// exactly which case broke.
-func TestBookSeat_ValidationErrors(t *testing.T) {
-	tests := []struct {
-		name    string
-		input   BookSeatInput
-		wantErr error
-	}{
-		{"missing user id", BookSeatInput{UserID: "", ShowID: 1, SeatID: 1}, ErrMissingUserID},
-		{"blank user id", BookSeatInput{UserID: "   ", ShowID: 1, SeatID: 1}, ErrMissingUserID},
-		{"zero show id", BookSeatInput{UserID: "alice", ShowID: 0, SeatID: 1}, ErrInvalidInput},
-		{"negative seat id", BookSeatInput{UserID: "alice", ShowID: 1, SeatID: -5}, ErrInvalidInput},
-		{"unknown show", BookSeatInput{UserID: "alice", ShowID: 99, SeatID: 1}, ErrShowNotFound},
-		{"unknown seat", BookSeatInput{UserID: "alice", ShowID: 1, SeatID: 99}, ErrSeatNotFound},
-		{"seat from another show", BookSeatInput{UserID: "alice", ShowID: 1, SeatID: 3}, ErrSeatNotInShow},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			svc, _, _ := newTestService()
-
-			_, err := svc.BookSeat(context.Background(), tc.input)
-
-			// ErrorIs uses errors.Is, so it also matches wrapped errors
-			// like "invalid input: show_id must be a positive number".
-			assert.ErrorIs(t, err, tc.wantErr)
-		})
-	}
-}
-
-func TestBookSeat_SameSeatTwice(t *testing.T) {
-	svc, _, _ := newTestService()
+// bookViaHold books a seat of show 1 the only way that exists: hold, then confirm.
+func bookViaHold(t *testing.T, svc *Service, userID string, seatID int64) Booking {
+	t.Helper()
 	ctx := context.Background()
-
-	_, err := svc.BookSeat(ctx, BookSeatInput{UserID: "alice", ShowID: 1, SeatID: 1})
+	h, _, err := svc.HoldSeat(ctx, HoldSeatInput{UserID: userID, ShowID: 1, SeatID: seatID})
 	require.NoError(t, err)
-
-	_, err = svc.BookSeat(ctx, BookSeatInput{UserID: "bob", ShowID: 1, SeatID: 1})
-	assert.ErrorIs(t, err, ErrSeatAlreadyBooked)
+	b, err := svc.ConfirmBooking(ctx, ConfirmInput{UserID: userID, HoldID: h.ID})
+	require.NoError(t, err)
+	return b
 }
 
 func TestListSeats_ShowsBookedStatus(t *testing.T) {
 	svc, _, _ := newTestService()
 	ctx := context.Background()
-	_, err := svc.BookSeat(ctx, BookSeatInput{UserID: "alice", ShowID: 1, SeatID: 2})
-	require.NoError(t, err)
+	bookViaHold(t, svc, "alice", 2)
 
 	seats, err := svc.ListSeats(ctx, 1)
 
@@ -310,8 +250,7 @@ func TestListSeats_UnknownShow(t *testing.T) {
 func TestGetBooking(t *testing.T) {
 	svc, _, _ := newTestService()
 	ctx := context.Background()
-	created, err := svc.BookSeat(ctx, BookSeatInput{UserID: "alice", ShowID: 1, SeatID: 1})
-	require.NoError(t, err)
+	created := bookViaHold(t, svc, "alice", 1)
 
 	got, err := svc.GetBooking(ctx, created.ID)
 	require.NoError(t, err)

@@ -15,9 +15,10 @@ import (
 	httpSwagger "github.com/swaggo/http-swagger/v2"
 )
 
-// NewRouter builds the HTTP handler for the whole API.
-func NewRouter(svc BookingService, db Pinger, logger *slog.Logger) http.Handler {
-	h := &handlers{svc: svc, db: db, logger: logger}
+// NewRouter builds the HTTP handler for the whole API. postgres and redis are
+// only used by /readyz to report each dependency's health.
+func NewRouter(svc BookingService, postgres, redis Pinger, logger *slog.Logger) http.Handler {
+	h := &handlers{svc: svc, postgres: postgres, redis: redis, logger: logger}
 
 	r := chi.NewRouter()
 
@@ -33,7 +34,9 @@ func NewRouter(svc BookingService, db Pinger, logger *slog.Logger) http.Handler 
 	r.Route("/v1", func(r chi.Router) {
 		r.Get("/shows", h.listShows)
 		r.Get("/shows/{showID}/seats", h.listSeats)
-		r.Post("/bookings", h.createBooking)
+		r.Post("/holds", h.createHold)
+		r.Delete("/holds/{holdID}", h.cancelHold)
+		r.Post("/bookings", h.confirmBooking)
 		r.Get("/bookings/{bookingID}", h.getBooking)
 	})
 

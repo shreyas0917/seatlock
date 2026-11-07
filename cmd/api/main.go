@@ -97,7 +97,7 @@ func run() error {
 
 	repo := booking.NewPostgresRepository(pool)
 	svc := booking.NewService(repo, locker, cfg.HoldTTL)
-	router := httpapi.NewRouter(svc, pool, logger)
+	router := httpapi.NewRouter(svc, pool, locker, logger)
 
 	server := &http.Server{
 		Addr:    cfg.HTTPAddr,

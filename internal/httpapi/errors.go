@@ -50,6 +50,20 @@ func mapError(err error) httpError {
 		return httpError{http.StatusNotFound, "BOOKING_NOT_FOUND", "booking not found"}
 	case errors.Is(err, booking.ErrSeatAlreadyBooked):
 		return httpError{http.StatusConflict, "SEAT_ALREADY_BOOKED", "this seat has already been booked"}
+	case errors.Is(err, booking.ErrSeatHeld):
+		return httpError{http.StatusConflict, "SEAT_HELD", "this seat is currently held by another user"}
+	case errors.Is(err, booking.ErrHoldNotFound):
+		return httpError{http.StatusNotFound, "HOLD_NOT_FOUND", "hold not found"}
+	case errors.Is(err, booking.ErrHoldAlreadyUsed):
+		return httpError{http.StatusConflict, "HOLD_ALREADY_USED", "this hold has already been used for a booking"}
+	case errors.Is(err, booking.ErrHoldExpired):
+		// 410 Gone: the hold existed, but it is gone for good. Retrying the
+		// same request will never work; the user must hold the seat again.
+		return httpError{http.StatusGone, "HOLD_EXPIRED", "this hold has expired or was cancelled"}
+	case errors.Is(err, booking.ErrLockUnavailable):
+		// Fail closed: we could not ask the seat lock, so no new hold was
+		// created. 503 because it is temporary and the client may retry.
+		return httpError{http.StatusServiceUnavailable, "LOCK_UNAVAILABLE", "seat holds are temporarily unavailable, please retry shortly"}
 	case errors.Is(err, booking.ErrBusy):
 		// Why 503 and not 500: 500 says "the server is broken", so clients and
 		// on-call engineers treat it as a bug. A timeout under load is not a

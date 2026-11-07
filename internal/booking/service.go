@@ -10,7 +10,6 @@ package booking
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 )
 
@@ -25,7 +24,6 @@ import (
 // Error contract (implementations must follow it):
 //   - GetShow returns ErrShowNotFound, GetSeat ErrSeatNotFound,
 //     GetBooking ErrBookingNotFound when the row does not exist;
-//   - CreateBooking returns ErrSeatAlreadyBooked when the seat is taken;
 //   - CreateHold returns ErrSeatHeld / ErrSeatAlreadyBooked when the seat is
 //     not free, and created=false with the existing hold for a same-user retry;
 //   - ConfirmHold and ReleaseHold return ErrHoldNotFound, ErrHoldAlreadyUsed
@@ -35,7 +33,6 @@ type Repository interface {
 	GetShow(ctx context.Context, showID int64) (Show, error)
 	GetSeat(ctx context.Context, seatID int64) (Seat, error)
 	ListSeatsWithStatus(ctx context.Context, showID int64) ([]SeatWithStatus, error)
-	CreateBooking(ctx context.Context, in BookSeatInput) (Booking, error)
 	GetBooking(ctx context.Context, bookingID int64) (Booking, error)
 	CreateHold(ctx context.Context, in HoldSeatInput, ttl time.Duration) (hold Hold, created bool, err error)
 	ConfirmHold(ctx context.Context, in ConfirmInput) (Booking, error)
@@ -71,53 +68,6 @@ func (s *Service) ListSeats(ctx context.Context, showID int64) ([]SeatWithStatus
 		return nil, err
 	}
 	return s.repo.ListSeatsWithStatus(ctx, showID)
-}
-
-// BookSeat books one seat for one user.
-//
-// The validation below gives clients clear errors (400/404), but it is NOT what
-// prevents double booking. Double booking is prevented by the database's
-// UNIQUE(show_id, seat_id) constraint, enforced inside CreateBooking.
-//
-// Why we do NOT write "if seat is free { insert }" here (check-then-insert):
-//
-//	time  user A                       user B
-//	t1    SELECT -> seat 7 is free
-//	t2                                 SELECT -> seat 7 is free
-//	t3    INSERT booking (seat 7)
-//	t4                                 INSERT booking (seat 7)   <- double booking!
-//
-// Between the check and the insert there is a gap, and another request can
-// slip into it. Adding a mutex in Go would not help either: with 2+ API
-// servers, each has its own mutex. The database is the one place every
-// request goes through, and a UNIQUE constraint is checked atomically inside
-// Postgres: of two concurrent inserts for the same seat, exactly one commits
-// and the other gets error 23505, which we turn into ErrSeatAlreadyBooked.
-func (s *Service) BookSeat(ctx context.Context, in BookSeatInput) (Booking, error) {
-	in.UserID = strings.TrimSpace(in.UserID)
-	if in.UserID == "" {
-		return Booking{}, ErrMissingUserID
-	}
-	if in.ShowID <= 0 {
-		return Booking{}, fmt.Errorf("%w: show_id must be a positive number", ErrInvalidInput)
-	}
-	if in.SeatID <= 0 {
-		return Booking{}, fmt.Errorf("%w: seat_id must be a positive number", ErrInvalidInput)
-	}
-
-	if _, err := s.repo.GetShow(ctx, in.ShowID); err != nil {
-		return Booking{}, err
-	}
-	seat, err := s.repo.GetSeat(ctx, in.SeatID)
-	if err != nil {
-		return Booking{}, err
-	}
-	if seat.ShowID != in.ShowID {
-		return Booking{}, ErrSeatNotInShow
-	}
-
-	// The real safety check happens here, inside the database.
-	return s.repo.CreateBooking(ctx, in)
 }
 
 // GetBooking returns one booking by ID.

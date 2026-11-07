@@ -1,19 +1,22 @@
 //go:build integration
 
 // http_integration_test.go fires real HTTP requests at the real router, wired
-// to the real Postgres repository, using the DEFAULT pool settings from
-// internal/config (DB_MAX_CONNS / DB_MIN_CONNS) and NO warm-up.
+// to the real Postgres repository and the real Redis locker, using the
+// DEFAULT pool settings from internal/config (DB_MAX_CONNS / DB_MIN_CONNS)
+// and NO warm-up.
 //
 // Why: a burst of requests against a small pool used to queue for
 // connections until the 3s query timeout fired, and that showed up as 500s.
-// This test proves a burst gets only "normal" answers. Any 503 or 500 is
-// printed in full so it can be investigated, never hidden.
+// This test proves a burst gets only "normal" answers (201/200/409). Any 503
+// or 500 is printed in full so it can be investigated, never hidden.
 //
-// Run with: make test-integration (needs `make up`).
+// Run with: make test-integration (needs `make up`). Redis database 1 is used
+// and emptied first, so the app's data in database 0 is untouched.
 package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -30,6 +33,7 @@ import (
 	"github.com/shreyas0917/seatlock/internal/booking"
 	"github.com/shreyas0917/seatlock/internal/config"
 	"github.com/shreyas0917/seatlock/internal/db"
+	"github.com/shreyas0917/seatlock/internal/lock"
 )
 
 const defaultTestDatabaseURL = "postgres://seatlock:seatlock@localhost:5434/seatlock_test?sslmode=disable"
@@ -41,22 +45,34 @@ type httpResult struct {
 	err    error
 }
 
-func TestHTTP_ParallelBurstHasNo500s(t *testing.T) {
+func TestHTTP_ParallelHoldBurstHasNo500s(t *testing.T) {
 	ctx := context.Background()
 
-	url := os.Getenv("TEST_DATABASE_URL")
-	if url == "" {
-		url = defaultTestDatabaseURL
+	dbURL := os.Getenv("TEST_DATABASE_URL")
+	if dbURL == "" {
+		dbURL = defaultTestDatabaseURL
 	}
-	require.NoError(t, db.MigrateUp(url), "is postgres running? try `make up`")
+	require.NoError(t, db.MigrateUp(dbURL), "is postgres running? try `make up`")
 
 	// The same defaults the real server uses: no special test-only pool size.
 	defaults, err := config.Load()
 	require.NoError(t, err)
-	pool, err := db.NewPool(ctx, url, defaults.DBMaxConns, defaults.DBMinConns)
+	pool, err := db.NewPool(ctx, dbURL, defaults.DBMaxConns, defaults.DBMinConns)
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
 	t.Logf("pool: max_conns=%d min_conns=%d", defaults.DBMaxConns, defaults.DBMinConns)
+
+	redisAddr := os.Getenv("TEST_REDIS_ADDR")
+	if redisAddr == "" {
+		redisAddr = "localhost:6379"
+	}
+	rdb := lock.NewClient(lock.Options{
+		Addr: redisAddr, DB: 1,
+		DialTimeout: defaults.RedisDialTimeout, ReadTimeout: defaults.RedisReadTimeout, WriteTimeout: defaults.RedisWriteTimeout,
+	})
+	t.Cleanup(func() { _ = rdb.Close() })
+	require.NoError(t, rdb.FlushDB(ctx).Err(), "is redis running? try `make up`")
+	locker := lock.NewRedisLocker(rdb, defaults.HoldTTL, defaults.RedisLockExtra)
 
 	// Fresh data: one show with one seat.
 	_, err = pool.Exec(ctx, `TRUNCATE bookings, holds, seats, shows RESTART IDENTITY CASCADE`)
@@ -71,15 +87,30 @@ func TestHTTP_ParallelBurstHasNo500s(t *testing.T) {
 
 	// A real HTTP server on a random local port, with the production router.
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	router := NewRouter(booking.NewService(booking.NewPostgresRepository(pool), allowAllLocker{}, defaults.HoldTTL), pool, logger)
-	server := httptest.NewServer(router)
+	svc := booking.NewService(booking.NewPostgresRepository(pool), locker, defaults.HoldTTL)
+	server := httptest.NewServer(NewRouter(svc, pool, locker, logger))
 	t.Cleanup(server.Close)
 
 	// Allow 50 open connections from the client so the requests really run in parallel.
 	client := &http.Client{Transport: &http.Transport{MaxIdleConnsPerHost: 50, MaxConnsPerHost: 50}}
+	post := func(path, userID, body string) httpResult {
+		req, err := http.NewRequest(http.MethodPost, server.URL+path, strings.NewReader(body))
+		if err != nil {
+			return httpResult{err: err}
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-User-ID", userID)
+		resp, err := client.Do(req)
+		if err != nil {
+			return httpResult{err: err}
+		}
+		defer resp.Body.Close()
+		respBody, _ := io.ReadAll(resp.Body)
+		return httpResult{status: resp.StatusCode, body: string(respBody)}
+	}
 
 	const requests = 50
-	body := fmt.Sprintf(`{"show_id": %d, "seat_id": %d}`, showID, seatID)
+	holdBody := fmt.Sprintf(`{"show_id": %d, "seat_id": %d}`, showID, seatID)
 	results := make([]httpResult, requests)
 	start := make(chan struct{})
 	var wg sync.WaitGroup
@@ -89,30 +120,14 @@ func TestHTTP_ParallelBurstHasNo500s(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			<-start
-
-			req, err := http.NewRequest(http.MethodPost, server.URL+"/v1/bookings", strings.NewReader(body))
-			if err != nil {
-				results[i] = httpResult{err: err}
-				return
-			}
-			req.Header.Set("Content-Type", "application/json")
-			req.Header.Set("X-User-ID", fmt.Sprintf("burst-user-%d", i))
-
-			resp, err := client.Do(req)
-			if err != nil {
-				results[i] = httpResult{err: err}
-				return
-			}
-			defer resp.Body.Close()
-			respBody, _ := io.ReadAll(resp.Body)
-			results[i] = httpResult{status: resp.StatusCode, body: string(respBody)}
+			results[i] = post("/v1/holds", fmt.Sprintf("burst-user-%d", i), holdBody)
 		}(i)
 	}
-
 	close(start)
 	wg.Wait()
 
 	counts := map[int]int{}
+	winner := -1
 	for i, r := range results {
 		if r.err != nil {
 			t.Errorf("request %d failed at the transport level: %v", i, r.err)
@@ -120,7 +135,9 @@ func TestHTTP_ParallelBurstHasNo500s(t *testing.T) {
 		}
 		counts[r.status]++
 		switch r.status {
-		case http.StatusCreated, http.StatusOK, http.StatusConflict:
+		case http.StatusCreated:
+			winner = i
+		case http.StatusOK, http.StatusConflict:
 			// expected
 		default:
 			// Print the full body: it contains the error code (e.g. SERVICE_BUSY).
@@ -128,9 +145,17 @@ func TestHTTP_ParallelBurstHasNo500s(t *testing.T) {
 		}
 	}
 
-	t.Logf("%d parallel requests -> status counts: %v (503s: %d, 500s: %d)",
+	t.Logf("%d parallel hold requests -> status counts: %v (503s: %d, 500s: %d)",
 		requests, counts, counts[http.StatusServiceUnavailable], counts[http.StatusInternalServerError])
-	assert.Equal(t, 1, counts[http.StatusCreated], "exactly one booking must win")
+	assert.Equal(t, 1, counts[http.StatusCreated], "exactly one hold must win")
 	assert.Equal(t, requests-1, counts[http.StatusConflict], "everyone else gets 409")
 	assert.Zero(t, counts[http.StatusInternalServerError], "a burst must never produce 500s")
+	require.GreaterOrEqual(t, winner, 0)
+
+	// The winner confirms its hold over HTTP.
+	var hold HoldResponse
+	require.NoError(t, json.Unmarshal([]byte(results[winner].body), &hold))
+	confirm := post("/v1/bookings", fmt.Sprintf("burst-user-%d", winner), fmt.Sprintf(`{"hold_id": %d}`, hold.HoldID))
+	require.NoError(t, confirm.err)
+	assert.Equal(t, http.StatusCreated, confirm.status, confirm.body)
 }

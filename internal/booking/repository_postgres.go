@@ -202,56 +202,8 @@ func (r *PostgresRepository) ListSeatsWithStatus(ctx context.Context, showID int
 	return seats, nil
 }
 
-// CreateBooking inserts a booking and lets PostgreSQL decide if the seat is free.
-//
-// There is deliberately NO "SELECT ... is it booked?" before the INSERT (see
-// the timeline in service.go). The INSERT is a single atomic operation: if two
-// requests insert the same (show_id, seat_id) at the same moment, Postgres
-// lets one commit and makes the other fail with error 23505 on the
-// bookings_show_seat_unique constraint. We translate that into
-// ErrSeatAlreadyBooked, which the HTTP layer returns as 409 Conflict.
-func (r *PostgresRepository) CreateBooking(ctx context.Context, in BookSeatInput) (Booking, error) {
-	ctx, cancel := context.WithTimeout(ctx, r.queryTimeout)
-	defer cancel()
-
-	// TEMPORARY (removed when POST /v1/bookings becomes confirm-only):
-	// migration 0002 requires every booking to reference a hold. Until the
-	// hold -> confirm flow is wired, a direct booking records an instantly
-	// CONSUMED hold in the same transaction, so the old flow keeps working.
-	tx, err := r.pool.Begin(ctx)
-	if err != nil {
-		return Booking{}, dbError(err, "begin create booking")
-	}
-	defer tx.Rollback(ctx) // no-op after a successful Commit
-
-	var holdID int64
-	err = tx.QueryRow(ctx, `
-		INSERT INTO holds (show_id, seat_id, user_id, status, expires_at)
-		VALUES ($1, $2, $3, 'CONSUMED', NOW())
-		RETURNING id`,
-		in.ShowID, in.SeatID, in.UserID).Scan(&holdID)
-	if err != nil {
-		return Booking{}, mapInsertBookingError(err)
-	}
-
-	var b Booking
-	err = tx.QueryRow(ctx, `
-		INSERT INTO bookings (show_id, seat_id, user_id, hold_id)
-		VALUES ($1, $2, $3, $4)
-		RETURNING id, show_id, seat_id, user_id, hold_id, created_at`,
-		in.ShowID, in.SeatID, in.UserID, holdID).
-		Scan(&b.ID, &b.ShowID, &b.SeatID, &b.UserID, &b.HoldID, &b.CreatedAt)
-	if err != nil {
-		return Booking{}, mapInsertBookingError(err)
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return Booking{}, mapInsertBookingError(err)
-	}
-	return b, nil
-}
-
-// mapInsertBookingError turns known constraint violations into domain errors.
+// mapInsertBookingError turns known constraint violations on the bookings
+// insert (in ConfirmHold) into domain errors.
 //
 // errors.As looks through the chain of wrapped errors for one of type
 // *pgconn.PgError (the error pgx returns when Postgres itself rejects a

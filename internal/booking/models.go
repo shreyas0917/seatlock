@@ -59,13 +59,6 @@ type Booking struct {
 	CreatedAt time.Time
 }
 
-// BookSeatInput is what a client sends to book a seat.
-type BookSeatInput struct {
-	UserID string
-	ShowID int64
-	SeatID int64
-}
-
 // HoldStatus is the lifecycle state of a hold (see the CHECK constraint in
 // db/migrations/0002_holds.up.sql).
 type HoldStatus string

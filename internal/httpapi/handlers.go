@@ -23,16 +23,18 @@ import (
 )
 
 // BookingService is what the handlers need from the booking layer.
-// *booking.Service satisfies it; handler tests use a small stub instead.
+// *booking.Service satisfies it.
 type BookingService interface {
 	ListShows(ctx context.Context) ([]booking.Show, error)
 	ListSeats(ctx context.Context, showID int64) ([]booking.SeatWithStatus, error)
-	BookSeat(ctx context.Context, in booking.BookSeatInput) (booking.Booking, error)
+	HoldSeat(ctx context.Context, in booking.HoldSeatInput) (booking.Hold, bool, error)
+	CancelHold(ctx context.Context, userID string, holdID int64) (booking.Hold, error)
+	ConfirmBooking(ctx context.Context, in booking.ConfirmInput) (booking.Booking, error)
 	GetBooking(ctx context.Context, bookingID int64) (booking.Booking, error)
 }
 
-// Pinger is anything that can check the database is reachable.
-// *pgxpool.Pool satisfies it.
+// Pinger is anything that can check a dependency is reachable.
+// *pgxpool.Pool and *lock.RedisLocker both satisfy it.
 type Pinger interface {
 	Ping(ctx context.Context) error
 }
@@ -41,14 +43,15 @@ type Pinger interface {
 // the client simply says who it is.
 const userIDHeader = "X-User-ID"
 
-// readinessTimeout is how long /readyz waits for Postgres before giving up.
+// readinessTimeout is how long /readyz waits for each dependency.
 const readinessTimeout = 1 * time.Second
 
 // handlers holds the dependencies shared by all endpoints.
 type handlers struct {
-	svc    BookingService
-	db     Pinger
-	logger *slog.Logger
+	svc      BookingService
+	postgres Pinger
+	redis    Pinger
+	logger   *slog.Logger
 }
 
 // healthz godoc
@@ -66,22 +69,43 @@ func (h *handlers) healthz(w http.ResponseWriter, r *http.Request) {
 // readyz godoc
 //
 //	@Summary		Readiness check
-//	@Description	Returns 200 only if PostgreSQL answers a ping within 1 second, otherwise 503.
+//	@Description	Reports Postgres and Redis. Returns 200 whenever Postgres answers within 1s,
+//	@Description	even if Redis is down; returns 503 only when Postgres is down.
 //	@Tags			health
 //	@Produce		json
-//	@Success		200	{object}	StatusResponse
-//	@Failure		503	{object}	StatusResponse
+//	@Success		200	{object}	ReadinessResponse
+//	@Failure		503	{object}	ReadinessResponse
 //	@Router			/readyz [get]
+//
+// Why a Redis outage must NOT make readyz fail: a load balancer removes every
+// instance whose readiness check fails. Redis is shared, so if it goes down,
+// EVERY instance would fail at the same moment and the whole API would
+// vanish, including confirms, seat maps and booking lookups, which still
+// work without Redis (only NEW holds are refused, with 503 LOCK_UNAVAILABLE).
+// So readyz reports Redis for humans and dashboards, but only Postgres, the
+// thing no request can do without, decides 200 vs 503.
 func (h *handlers) readyz(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), readinessTimeout)
-	defer cancel()
-
-	if err := h.db.Ping(ctx); err != nil {
-		h.logger.Warn("readiness check failed", "error", err.Error())
-		writeJSON(w, http.StatusServiceUnavailable, StatusResponse{Status: "database unavailable"})
-		return
+	resp := ReadinessResponse{
+		Postgres: h.pingStatus(r.Context(), "postgres", h.postgres),
+		Redis:    h.pingStatus(r.Context(), "redis", h.redis),
 	}
-	writeJSON(w, http.StatusOK, StatusResponse{Status: "ready"})
+
+	status := http.StatusOK
+	if resp.Postgres != "up" {
+		status = http.StatusServiceUnavailable
+	}
+	writeJSON(w, status, resp)
+}
+
+// pingStatus pings one dependency and returns "up" or "down".
+func (h *handlers) pingStatus(ctx context.Context, name string, p Pinger) string {
+	ctx, cancel := context.WithTimeout(ctx, readinessTimeout)
+	defer cancel()
+	if err := p.Ping(ctx); err != nil {
+		h.logger.Warn("readiness: dependency down", "dependency", name, "error", err.Error())
+		return "down"
+	}
+	return "up"
 }
 
 // listShows godoc
@@ -91,6 +115,7 @@ func (h *handlers) readyz(w http.ResponseWriter, r *http.Request) {
 //	@Produce	json
 //	@Success	200	{object}	ShowListResponse
 //	@Failure	500	{object}	ErrorResponse
+//	@Failure	503	{object}	ErrorResponse	"Database busy"
 //	@Router		/v1/shows [get]
 func (h *handlers) listShows(w http.ResponseWriter, r *http.Request) {
 	shows, err := h.svc.ListShows(r.Context())
@@ -109,7 +134,8 @@ func (h *handlers) listShows(w http.ResponseWriter, r *http.Request) {
 // listSeats godoc
 //
 //	@Summary		Seat map of a show
-//	@Description	Every seat of the show with its price and status (AVAILABLE or BOOKED).
+//	@Description	Every seat of the show with its price and status (AVAILABLE, HELD or BOOKED),
+//	@Description	computed from PostgreSQL only.
 //	@Tags			shows
 //	@Produce		json
 //	@Param			showID	path		int	true	"Show ID"
@@ -117,6 +143,7 @@ func (h *handlers) listShows(w http.ResponseWriter, r *http.Request) {
 //	@Failure		400		{object}	ErrorResponse
 //	@Failure		404		{object}	ErrorResponse
 //	@Failure		500		{object}	ErrorResponse
+//	@Failure		503		{object}	ErrorResponse	"Database busy"
 //	@Router			/v1/shows/{showID}/seats [get]
 func (h *handlers) listSeats(w http.ResponseWriter, r *http.Request) {
 	showID, err := pathID(r, "showID")
@@ -138,24 +165,102 @@ func (h *handlers) listSeats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// createBooking godoc
+// createHold godoc
 //
-//	@Summary		Book a seat
-//	@Description	Books one seat directly (no holds in Phase 1). If several users book the
-//	@Description	same seat at once, exactly one gets 201 and the rest get 409.
+//	@Summary		Hold a seat
+//	@Description	Reserves a seat for the user for 5 minutes. Returns 201 for a new hold, or 200
+//	@Description	with the same hold if this user already holds the seat (safe to retry).
+//	@Description	If the seat lock (Redis) is unavailable, no hold is created: 503 LOCK_UNAVAILABLE.
+//	@Tags			holds
+//	@Accept			json
+//	@Produce		json
+//	@Param			X-User-ID	header		string				true	"Who is holding"
+//	@Param			request		body		CreateHoldRequest	true	"Seat to hold"
+//	@Success		201			{object}	HoldResponse		"New hold"
+//	@Success		200			{object}	HoldResponse		"Existing hold of this user"
+//	@Failure		400			{object}	ErrorResponse		"Bad input or missing X-User-ID"
+//	@Failure		404			{object}	ErrorResponse		"Show or seat not found"
+//	@Failure		409			{object}	ErrorResponse		"SEAT_HELD or SEAT_ALREADY_BOOKED"
+//	@Failure		503			{object}	ErrorResponse		"LOCK_UNAVAILABLE or SERVICE_BUSY"
+//	@Failure		500			{object}	ErrorResponse
+//	@Router			/v1/holds [post]
+func (h *handlers) createHold(w http.ResponseWriter, r *http.Request) {
+	var req CreateHoldRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+
+	hold, created, err := h.svc.HoldSeat(r.Context(), booking.HoldSeatInput{
+		UserID: r.Header.Get(userIDHeader),
+		ShowID: req.ShowID,
+		SeatID: req.SeatID,
+	})
+	if err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+
+	status := http.StatusOK // the user's existing hold, returned again
+	if created {
+		status = http.StatusCreated
+	}
+	writeJSON(w, status, toHoldResponse(hold))
+}
+
+// cancelHold godoc
+//
+//	@Summary		Cancel a hold
+//	@Description	Releases the user's active hold so others can take the seat. Works even when
+//	@Description	Redis is down (PostgreSQL is updated; the Redis lock then expires by TTL).
+//	@Tags			holds
+//	@Produce		json
+//	@Param			X-User-ID	header		string	true	"Owner of the hold"
+//	@Param			holdID		path		int		true	"Hold ID"
+//	@Success		200			{object}	HoldResponse
+//	@Failure		400			{object}	ErrorResponse
+//	@Failure		404			{object}	ErrorResponse	"HOLD_NOT_FOUND (also for another user's hold)"
+//	@Failure		409			{object}	ErrorResponse	"HOLD_ALREADY_USED"
+//	@Failure		410			{object}	ErrorResponse	"HOLD_EXPIRED"
+//	@Failure		503			{object}	ErrorResponse	"SERVICE_BUSY"
+//	@Failure		500			{object}	ErrorResponse
+//	@Router			/v1/holds/{holdID} [delete]
+func (h *handlers) cancelHold(w http.ResponseWriter, r *http.Request) {
+	holdID, err := pathID(r, "holdID")
+	if err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+
+	hold, err := h.svc.CancelHold(r.Context(), r.Header.Get(userIDHeader), holdID)
+	if err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, toHoldResponse(hold))
+}
+
+// confirmBooking godoc
+//
+//	@Summary		Confirm a hold into a booking
+//	@Description	Turns the user's active hold into a booking. Uses PostgreSQL only, so it still
+//	@Description	works while Redis is down. Of several concurrent confirms of one hold, exactly
+//	@Description	one gets 201 and the rest get 409 HOLD_ALREADY_USED.
 //	@Tags			bookings
 //	@Accept			json
 //	@Produce		json
-//	@Param			X-User-ID	header		string					true	"Who is booking"
-//	@Param			request		body		CreateBookingRequest	true	"Seat to book"
+//	@Param			X-User-ID	header		string					true	"Owner of the hold"
+//	@Param			request		body		ConfirmBookingRequest	true	"Hold to confirm"
 //	@Success		201			{object}	BookingResponse
 //	@Failure		400			{object}	ErrorResponse	"Bad input or missing X-User-ID"
-//	@Failure		404			{object}	ErrorResponse	"Show or seat not found"
-//	@Failure		409			{object}	ErrorResponse	"Seat already booked"
+//	@Failure		404			{object}	ErrorResponse	"HOLD_NOT_FOUND (also for another user's hold)"
+//	@Failure		409			{object}	ErrorResponse	"HOLD_ALREADY_USED or SEAT_ALREADY_BOOKED"
+//	@Failure		410			{object}	ErrorResponse	"HOLD_EXPIRED"
+//	@Failure		503			{object}	ErrorResponse	"SERVICE_BUSY"
 //	@Failure		500			{object}	ErrorResponse
 //	@Router			/v1/bookings [post]
-func (h *handlers) createBooking(w http.ResponseWriter, r *http.Request) {
-	var req CreateBookingRequest
+func (h *handlers) confirmBooking(w http.ResponseWriter, r *http.Request) {
+	var req ConfirmBookingRequest
 	if err := decodeJSON(w, r, &req); err != nil {
 		h.writeError(w, r, err)
 		return
@@ -163,10 +268,9 @@ func (h *handlers) createBooking(w http.ResponseWriter, r *http.Request) {
 
 	// The handler only passes the header along; deciding that an empty user
 	// is invalid is a business rule, so the service checks it.
-	b, err := h.svc.BookSeat(r.Context(), booking.BookSeatInput{
+	b, err := h.svc.ConfirmBooking(r.Context(), booking.ConfirmInput{
 		UserID: r.Header.Get(userIDHeader),
-		ShowID: req.ShowID,
-		SeatID: req.SeatID,
+		HoldID: req.HoldID,
 	})
 	if err != nil {
 		h.writeError(w, r, err)
@@ -185,6 +289,7 @@ func (h *handlers) createBooking(w http.ResponseWriter, r *http.Request) {
 //	@Failure	400			{object}	ErrorResponse
 //	@Failure	404			{object}	ErrorResponse
 //	@Failure	500			{object}	ErrorResponse
+//	@Failure	503			{object}	ErrorResponse	"Database busy"
 //	@Router		/v1/bookings/{bookingID} [get]
 func (h *handlers) getBooking(w http.ResponseWriter, r *http.Request) {
 	bookingID, err := pathID(r, "bookingID")
