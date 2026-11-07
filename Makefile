@@ -7,8 +7,10 @@ export
 POSTGRES_USER ?= seatlock
 POSTGRES_DB   ?= seatlock
 SWAG_VERSION  := v1.16.4
+# Extra flags for go test, e.g. `make test TEST_FLAGS=-race` (CI does this on Linux).
+TEST_FLAGS    ?=
 
-.PHONY: up down logs run test test-integration migrate-up migrate-down seed swagger lint
+.PHONY: up down logs run test test-integration verify migrate-up migrate-down seed swagger lint
 
 ## up: build the API image and start postgres, redis and api in the background
 up:
@@ -28,13 +30,17 @@ run:
 
 ## test: fast unit tests (no database needed)
 test:
-	go test -count=1 ./...
+	go test -count=1 $(TEST_FLAGS) ./...
 
 ## test-integration: tests against the real Postgres from docker compose
 ## -p 1 runs one package at a time: integration tests in different packages
 ## share the seatlock_test database, so they must not TRUNCATE it in parallel.
 test-integration:
-	go test -count=1 -p 1 -tags=integration ./...
+	go test -count=1 -p 1 -tags=integration $(TEST_FLAGS) ./...
+
+## verify: gofmt + vet + unit + integration tests, full log in tmp/. Push only if this passes.
+verify:
+	./scripts/verify.sh
 
 ## migrate-up: apply all pending migrations to DATABASE_URL
 migrate-up:
