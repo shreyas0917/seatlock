@@ -28,6 +28,7 @@ import (
 
 	"github.com/shreyas0917/seatlock/internal/booking"
 	"github.com/shreyas0917/seatlock/internal/idempotency"
+	"github.com/shreyas0917/seatlock/internal/lock"
 	"github.com/shreyas0917/seatlock/internal/metrics"
 )
 
@@ -210,7 +211,7 @@ func (f *fakeIdem) Begin(ctx context.Context, userID, key, hash string) (idempot
 		return idempotency.Claim{}, idempotency.ErrInProgress
 	default: // released: take it again
 		e.token = "t2"
-		return idempotency.Claim{Kind: idempotency.Proceed, Token: "t2"}, nil
+		return idempotency.Claim{Kind: idempotency.Proceed, Token: "t2", TookOver: true}, nil
 	}
 }
 
@@ -676,4 +677,42 @@ func TestMetrics_NotOnThePublicRouter(t *testing.T) {
 	rec := send(t, router, http.MethodGet, "/metrics", "", "")
 
 	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+// The metric reflects FAIL CLOSED: Redis unreachable -> the lock op is
+// counted as result="error" AND the hold is answered with 503.
+func TestMetrics_RedisLockErrorIsCountedAndHoldFailsClosed(t *testing.T) {
+	m := metrics.NewAPI()
+	dead := lock.NewRedisLocker(lock.NewClient(lock.Options{Addr: "127.0.0.1:1",
+		DialTimeout: 200 * time.Millisecond, ReadTimeout: 200 * time.Millisecond, WriteTimeout: 200 * time.Millisecond}),
+		time.Minute, 10*time.Second).WithObserver(m.ObserveLockOp)
+	svc := booking.NewService(&stubRepository{}, dead, stubGateway{}, time.Minute)
+	svc.SetObserver(m)
+	router := NewRouter(svc, newFakeIdem(), stubPinger{}, stubPinger{}, slog.New(slog.NewJSONHandler(io.Discard, nil)), WithMetrics(m))
+
+	rec := send(t, router, http.MethodPost, "/v1/holds", "alice", holdBody)
+
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	assert.Equal(t, 1.0, testutil.ToFloat64(m.RedisLockOps.WithLabelValues("acquire", "error")))
+	assert.Equal(t, 1.0, testutil.ToFloat64(m.Holds.WithLabelValues("lock_unavailable")))
+	assert.Equal(t, 1.0, testutil.ToFloat64(m.HTTPRequests.WithLabelValues("/v1/holds", "POST", "503")))
+}
+
+func TestMetrics_IdempotencyResults(t *testing.T) {
+	m := metrics.NewAPI()
+	idem := newFakeIdem()
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	ok := NewRouter(booking.NewService(&stubRepository{}, stubLocker{}, stubGateway{}, time.Minute), idem, stubPinger{}, stubPinger{}, logger, WithMetrics(m))
+	noAnswer := NewRouter(booking.NewService(&stubRepository{}, stubLocker{}, stubGateway{chargeErr: booking.ErrGatewayNoAnswer}, time.Minute), idem, stubPinger{}, stubPinger{}, logger, WithMetrics(m))
+
+	sendWithKey(t, ok, "alice", "k1", `{"hold_id": 12}`)       // new
+	sendWithKey(t, ok, "alice", "k1", `{"hold_id": 12}`)       // replay
+	sendWithKey(t, ok, "alice", "k1", `{"hold_id": 13}`)       // reused_key
+	sendWithKey(t, noAnswer, "alice", "k2", `{"hold_id": 12}`) // new, 504 -> key released
+	sendWithKey(t, ok, "alice", "k2", `{"hold_id": 12}`)       // takeover
+
+	assert.Equal(t, 2.0, testutil.ToFloat64(m.Idempotency.WithLabelValues("new")))
+	assert.Equal(t, 1.0, testutil.ToFloat64(m.Idempotency.WithLabelValues("replay")))
+	assert.Equal(t, 1.0, testutil.ToFloat64(m.Idempotency.WithLabelValues("reused_key")))
+	assert.Equal(t, 1.0, testutil.ToFloat64(m.Idempotency.WithLabelValues("takeover")))
 }

@@ -66,8 +66,9 @@ func NewClient(opts Options) *redis.Client {
 
 // RedisLocker is a per-seat lock stored in Redis.
 type RedisLocker struct {
-	client *redis.Client
-	ttl    time.Duration
+	client  *redis.Client
+	ttl     time.Duration
+	observe func(op, result string)
 }
 
 // Compile-time check that RedisLocker satisfies the booking.SeatLocker interface.
@@ -91,7 +92,20 @@ var _ booking.SeatLocker = (*RedisLocker)(nil)
 // still says "held" (a new hold gets 409 for up to 10s). That errs on the
 // safe side.
 func NewRedisLocker(client *redis.Client, holdTTL, extra time.Duration) *RedisLocker {
-	return &RedisLocker{client: client, ttl: holdTTL + extra}
+	return &RedisLocker{client: client, ttl: holdTTL + extra, observe: func(string, string) {}}
+}
+
+// WithObserver returns the locker with an operation observer (for metrics),
+// called once per operation with op (acquire, refresh, release) and result
+// (ok, held, error). The hook lives INSIDE the locker, not in a wrapper,
+// because only Acquire knows whether it took a new lock or refreshed the
+// user's own (a wrapper would see "acquired" both times). Call it once, at
+// startup, before the locker is shared.
+func (l *RedisLocker) WithObserver(observe func(op, result string)) *RedisLocker {
+	if observe != nil {
+		l.observe = observe
+	}
+	return l
 }
 
 // key is the Redis key for one seat, e.g. "seat:1:7".
@@ -142,6 +156,7 @@ func (l *RedisLocker) Acquire(ctx context.Context, showID, seatID int64, owner s
 
 	switch {
 	case err == nil:
+		l.observe("acquire", "ok")
 		return true, nil // we created the key: lock acquired
 
 	case errors.Is(err, redis.Nil):
@@ -154,6 +169,7 @@ func (l *RedisLocker) Acquire(ctx context.Context, showID, seatID int64, owner s
 
 	default:
 		// FAIL CLOSED: no answer is treated as "no lock", never as "free".
+		l.observe("acquire", "error")
 		return false, fmt.Errorf("%w: acquire %s: %w", booking.ErrLockUnavailable, k, err)
 	}
 
@@ -162,7 +178,13 @@ func (l *RedisLocker) Acquire(ctx context.Context, showID, seatID int64, owner s
 	// and refresh its TTL so Redis again outlives the new database hold.
 	refreshed, err := refreshIfOwnerScript.Run(ctx, l.client, []string{k}, owner, l.ttl.Milliseconds()).Int()
 	if err != nil {
+		l.observe("refresh", "error")
 		return false, fmt.Errorf("%w: refresh %s: %w", booking.ErrLockUnavailable, k, err)
+	}
+	if refreshed == 1 {
+		l.observe("refresh", "ok") // the user's own lock, TTL refreshed
+	} else {
+		l.observe("acquire", "held") // someone else holds it
 	}
 	// If the key expired between SET NX and the script, refreshed is 0 and
 	// we answer "someone holds it" (409). That is the safe mistake, and the
@@ -175,8 +197,10 @@ func (l *RedisLocker) Acquire(ctx context.Context, showID, seatID int64, owner s
 func (l *RedisLocker) Release(ctx context.Context, showID, seatID int64, owner string) error {
 	k := key(showID, seatID)
 	if err := releaseIfOwnerScript.Run(ctx, l.client, []string{k}, owner).Err(); err != nil {
+		l.observe("release", "error")
 		return fmt.Errorf("%w: release %s: %w", booking.ErrLockUnavailable, k, err)
 	}
+	l.observe("release", "ok")
 	return nil
 }
 

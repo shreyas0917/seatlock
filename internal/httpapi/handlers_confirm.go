@@ -13,6 +13,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -85,6 +86,7 @@ func (h *handlers) confirmBooking(w http.ResponseWriter, r *http.Request) {
 	//    with another hold_id is detected (422).
 	hash := idempotency.RequestHash(r.Method, r.URL.Path, fmt.Sprintf("hold_id=%d", req.HoldID))
 	claim, err := h.idem.Begin(r.Context(), userID, key, hash)
+	h.recordIdempotency(claim, err)
 	if err != nil {
 		h.writeError(w, r, err) // 422 key reused, 409 in progress, 503 busy
 		return
@@ -120,6 +122,29 @@ func (h *handlers) confirmBooking(w http.ResponseWriter, r *http.Request) {
 
 	setRetryAfter(w, status)
 	writeRawJSON(w, status, body)
+}
+
+// recordIdempotency counts what the idempotency layer decided (metrics).
+// It is recorded here because the idempotency layer lives at the HTTP edge;
+// the booking service never sees Idempotency-Keys.
+func (h *handlers) recordIdempotency(claim idempotency.Claim, err error) {
+	if h.metrics == nil {
+		return
+	}
+	switch {
+	case errors.Is(err, idempotency.ErrKeyReused):
+		h.metrics.IdempotencyResult("reused_key")
+	case errors.Is(err, idempotency.ErrInProgress):
+		h.metrics.IdempotencyResult("in_progress")
+	case err != nil:
+		// a database error: counted by the HTTP 5xx metrics, not here
+	case claim.Kind == idempotency.Replay:
+		h.metrics.IdempotencyResult("replay")
+	case claim.TookOver:
+		h.metrics.IdempotencyResult("takeover")
+	default:
+		h.metrics.IdempotencyResult("new")
+	}
 }
 
 // runConfirm calls the service and returns the HTTP status and JSON body.

@@ -28,6 +28,12 @@ const releaseTimeout = 500 * time.Millisecond
 // It returns created=true for a new hold, or created=false when the user
 // already held this seat (a retry), with that same hold.
 func (s *Service) HoldSeat(ctx context.Context, in HoldSeatInput) (Hold, bool, error) {
+	hold, created, err := s.holdSeat(ctx, in)
+	s.observer.HoldOutcome(HoldOutcomeOf(created, err)) // exactly one outcome per attempt
+	return hold, created, err
+}
+
+func (s *Service) holdSeat(ctx context.Context, in HoldSeatInput) (Hold, bool, error) {
 	in.UserID = strings.TrimSpace(in.UserID)
 	if err := validateSeatRequest(in.UserID, in.ShowID, in.SeatID); err != nil {
 		return Hold{}, false, err

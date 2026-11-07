@@ -73,6 +73,9 @@ type Claim struct {
 	Kind   Kind
 	Token  string   // the lease token, when Kind == Proceed
 	Stored Response // the stored response, when Kind == Replay
+	// TookOver is true when Proceed came from taking over an expired lease
+	// (the earlier request crashed or gave the key back), false for a new key.
+	TookOver bool
 }
 
 // Store keeps idempotency keys in the idempotency_keys table.
@@ -170,7 +173,7 @@ func (s *Store) Begin(ctx context.Context, userID, key, requestHash string) (Cla
 			return Claim{}, storeError(err, "take over idempotency key")
 		}
 		if tag.RowsAffected() == 1 {
-			return Claim{Kind: Proceed, Token: token}, nil
+			return Claim{Kind: Proceed, Token: token, TookOver: true}, nil
 		}
 		// Someone else completed or took it over in between: decide again.
 	}

@@ -56,13 +56,16 @@ type Service struct {
 	locker  SeatLocker
 	gateway PaymentGateway
 	holdTTL time.Duration
+	// observer receives hold/confirm outcomes for metrics (no-op by
+	// default; see SetObserver in observer.go).
+	observer Observer
 }
 
 // NewService builds a Service that stores data through repo, locks seats
 // through locker (Redis in production), takes payments through gateway and
 // creates holds lasting holdTTL.
 func NewService(repo Repository, locker SeatLocker, gateway PaymentGateway, holdTTL time.Duration) *Service {
-	return &Service{repo: repo, locker: locker, gateway: gateway, holdTTL: holdTTL}
+	return &Service{repo: repo, locker: locker, gateway: gateway, holdTTL: holdTTL, observer: noopObserver{}}
 }
 
 // ListShows returns every show.

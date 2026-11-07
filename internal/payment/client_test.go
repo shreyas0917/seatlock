@@ -12,10 +12,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/shreyas0917/seatlock/internal/booking"
+	"github.com/shreyas0917/seatlock/internal/metrics"
 	"github.com/shreyas0917/seatlock/internal/paymentmock"
 )
 
@@ -143,4 +145,26 @@ func TestLookup_GatewayDown_IsNoAnswer(t *testing.T) {
 	_, err := NewClient("http://127.0.0.1:1", time.Second).Lookup(context.Background(), "pay-1")
 	assert.ErrorIs(t, err, booking.ErrGatewayNoAnswer)
 	assert.NotErrorIs(t, err, booking.ErrChargeNotFound, "down is NOT the same as not found")
+}
+
+func TestInstrumented_RecordsOpAndResult(t *testing.T) {
+	_, srv := newMock(t)
+	m := metrics.NewAPI()
+	g := NewInstrumented(NewClient(srv.URL, time.Second), m)
+	ctx := context.Background()
+
+	_, _ = g.Lookup(ctx, "pay-1") // not found
+	_, _ = g.Charge(ctx, booking.ChargeRequest{IdempotencyKey: "pay-1", AmountPaise: 25000})
+	queue(t, srv, paymentmock.BehaviorDecline)
+	_, _ = g.Charge(ctx, booking.ChargeRequest{IdempotencyKey: "pay-2", AmountPaise: 25000})
+	_, _ = g.Void(ctx, "pay-3")
+	down := NewInstrumented(NewClient("http://127.0.0.1:1", 200*time.Millisecond), m)
+	_, _ = down.Charge(ctx, booking.ChargeRequest{IdempotencyKey: "pay-4", AmountPaise: 25000})
+
+	assert.Equal(t, 1.0, testutil.ToFloat64(m.GatewayRequests.WithLabelValues("lookup", "not_found")))
+	assert.Equal(t, 1.0, testutil.ToFloat64(m.GatewayRequests.WithLabelValues("charge", "ok")))
+	assert.Equal(t, 1.0, testutil.ToFloat64(m.GatewayRequests.WithLabelValues("charge", "declined")))
+	assert.Equal(t, 1.0, testutil.ToFloat64(m.GatewayRequests.WithLabelValues("void", "voided")))
+	assert.Equal(t, 1.0, testutil.ToFloat64(m.GatewayRequests.WithLabelValues("charge", "no_answer")))
+	assert.Equal(t, 3, testutil.CollectAndCount(m.GatewayDuration), "one latency series per op used (lookup, charge, void)")
 }

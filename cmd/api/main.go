@@ -105,22 +105,25 @@ func run() error {
 		MinIdleConns: int(cfg.RedisMinIdleConns),
 	})
 	defer redisClient.Close()
-	locker := lock.NewRedisLocker(redisClient, cfg.HoldTTL, cfg.RedisLockExtra)
+	// Metrics: one private registry, created first so every component below
+	// is wired to it BEFORE the server starts.
+	m := metrics.NewAPI()
+	m.RegisterDBPool(pool)
+	m.RegisterRedisPool(redisClient)
+
+	locker := lock.NewRedisLocker(redisClient, cfg.HoldTTL, cfg.RedisLockExtra).WithObserver(m.ObserveLockOp)
 
 	repo := booking.NewPostgresRepository(pool, cfg.DBQueryTimeout)
 	// The same limits as the worker, so both apply the same rules.
 	repo.SetLimits(booking.Limits{PendingHoldMax: cfg.PendingHoldMax, OutboxMaxAttempts: int(cfg.OutboxMaxAttempts)})
 	// The payment gateway client. Confirm talks to it over HTTP; nothing in
 	// the confirm/payment path depends on Redis.
-	gateway := payment.NewClient(cfg.PaymentURL, cfg.PaymentTimeout)
+	gateway := payment.NewInstrumented(payment.NewClient(cfg.PaymentURL, cfg.PaymentTimeout), m)
 	svc := booking.NewService(repo, locker, gateway, cfg.HoldTTL)
+	svc.SetObserver(m) // hold/confirm outcomes; must be set before serving
 	// Idempotency-Keys for POST /v1/bookings live in Postgres (not Redis), so
 	// duplicate protection keeps working while Redis is down.
 	idem := idempotency.NewStore(pool, cfg.IdempotencyLease, cfg.DBQueryTimeout)
-	// Metrics: one private registry; pool statistics are read at scrape time.
-	m := metrics.NewAPI()
-	m.RegisterDBPool(pool)
-	m.RegisterRedisPool(redisClient)
 	router := httpapi.NewRouter(svc, idem, pool, locker, logger, httpapi.WithMetrics(m))
 
 	// /metrics is served on a SEPARATE internal port (METRICS_ADDR), never on

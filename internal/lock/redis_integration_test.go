@@ -101,3 +101,17 @@ func TestPing(t *testing.T) {
 	l, _ := setupRedis(t)
 	assert.NoError(t, l.Ping(context.Background()))
 }
+
+func TestObserver_AcquireRefreshHeldRelease(t *testing.T) {
+	l, _ := setupRedis(t)
+	ops := map[string]int{}
+	l.WithObserver(func(op, result string) { ops[op+"/"+result]++ })
+	ctx := context.Background()
+
+	_, _ = l.Acquire(ctx, 1, 7, "alice") // new lock
+	_, _ = l.Acquire(ctx, 1, 7, "alice") // same owner: refresh
+	_, _ = l.Acquire(ctx, 1, 7, "bob")   // someone else holds it
+	_ = l.Release(ctx, 1, 7, "alice")
+
+	assert.Equal(t, map[string]int{"acquire/ok": 1, "refresh/ok": 1, "acquire/held": 1, "release/ok": 1}, ops)
+}

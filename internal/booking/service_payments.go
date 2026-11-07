@@ -49,6 +49,12 @@ import (
 // two concurrent inserts for the same seat, exactly one commits and the other
 // gets error 23505, which becomes ErrSeatAlreadyBooked.
 func (s *Service) ConfirmBooking(ctx context.Context, in ConfirmInput) (Booking, error) {
+	b, err := s.confirmBooking(ctx, in)
+	s.observer.ConfirmOutcome(ConfirmOutcomeOf(err)) // exactly one outcome per attempt
+	return b, err
+}
+
+func (s *Service) confirmBooking(ctx context.Context, in ConfirmInput) (Booking, error) {
 	in.UserID = strings.TrimSpace(in.UserID)
 	if in.UserID == "" {
 		return Booking{}, ErrMissingUserID

@@ -247,3 +247,20 @@ func NewWorker() *Metrics {
 func (m *Metrics) Handler() http.Handler {
 	return promhttp.HandlerFor(m.Registry, promhttp.HandlerOpts{})
 }
+
+// ------------------------------------------------- adapters for other packages
+// These small methods let other packages report into the metrics without
+// importing Prometheus types.
+
+// HoldOutcome implements booking.Observer.
+func (m *Metrics) HoldOutcome(outcome string) { m.Holds.WithLabelValues(outcome).Inc() }
+
+// ConfirmOutcome implements booking.Observer.
+func (m *Metrics) ConfirmOutcome(outcome string) { m.Confirms.WithLabelValues(outcome).Inc() }
+
+// ObserveLockOp is the lock.Options.Observe callback (op: acquire, refresh,
+// release; result: ok, held, error).
+func (m *Metrics) ObserveLockOp(op, result string) { m.RedisLockOps.WithLabelValues(op, result).Inc() }
+
+// IdempotencyResult records what the idempotency layer did with a confirm.
+func (m *Metrics) IdempotencyResult(result string) { m.Idempotency.WithLabelValues(result).Inc() }
