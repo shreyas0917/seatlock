@@ -3,6 +3,7 @@
 //	payment reconciler  every RECONCILE_INTERVAL (30s)  abandoned PENDING payments
 //	outbox drainer      every OUTBOX_INTERVAL (5s)      refunds, Redis lock releases
 //	hold expirer        every EXPIRE_INTERVAL (10s)     dead ACTIVE holds
+//	invariants          every INVARIANTS_INTERVAL (15s) verify.sql checks as live gauges
 //	key cleanup         every CLEANUP_INTERVAL (1h)     old idempotency keys
 //
 // It is wired from the SAME pieces as the API (config, pool, repository,
@@ -26,6 +27,7 @@ import (
 	"github.com/shreyas0917/seatlock/internal/config"
 	"github.com/shreyas0917/seatlock/internal/db"
 	"github.com/shreyas0917/seatlock/internal/idempotency"
+	"github.com/shreyas0917/seatlock/internal/invariants"
 	"github.com/shreyas0917/seatlock/internal/lock"
 	"github.com/shreyas0917/seatlock/internal/metrics"
 	"github.com/shreyas0917/seatlock/internal/payment"
@@ -89,6 +91,11 @@ func run() error {
 	svc := booking.NewService(repo, locker, gateway, cfg.HoldTTL)
 	keys := idempotency.NewStore(pool, cfg.IdempotencyLease, cfg.DBQueryTimeout)
 	batch := int(cfg.WorkerBatchSize)
+	checker := &worker.InvariantChecker{
+		Store:   &invariants.Store{Pool: pool, Checks: invariants.Checks, StatementTimeout: cfg.InvariantStatementTimeout},
+		Metrics: m, Logger: logger,
+	}
+	checker.Init()
 
 	jobs := []worker.Scheduled{
 		{Interval: cfg.ReconcileInterval, Job: &worker.Reconciler{
@@ -98,6 +105,7 @@ func run() error {
 			Store: repo, Actions: svc, Logger: logger, Lease: cfg.OutboxLease, BatchSize: batch}},
 		{Interval: cfg.ExpireInterval, Job: &worker.HoldExpirer{
 			Store: repo, Logger: logger, BatchSize: batch}},
+		{Interval: cfg.InvariantsInterval, Job: checker},
 		{Interval: cfg.CleanupInterval, Job: &worker.KeyCleanup{
 			Keys: keys, Logger: logger, Retention: cfg.IdempotencyRetention, BatchSize: batch}},
 	}

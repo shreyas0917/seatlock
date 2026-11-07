@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -30,7 +31,9 @@ import (
 	"github.com/shreyas0917/seatlock/internal/config"
 	"github.com/shreyas0917/seatlock/internal/db"
 	"github.com/shreyas0917/seatlock/internal/idempotency"
+	"github.com/shreyas0917/seatlock/internal/invariants"
 	"github.com/shreyas0917/seatlock/internal/lock"
+	"github.com/shreyas0917/seatlock/internal/metrics"
 	"github.com/shreyas0917/seatlock/internal/payment"
 	"github.com/shreyas0917/seatlock/internal/paymentmock"
 	"github.com/shreyas0917/seatlock/internal/worker"
@@ -612,4 +615,71 @@ func TestDrainer_StaleReleaseLock_KeepsSameUsersNewLock(t *testing.T) {
 	assert.Equal(t, "alice", e.rdb.Get(ctx, key).Val(), "A's current lock still exists and is owned by A")
 	assert.Equal(t, "ACTIVE", e.str(`SELECT status FROM holds WHERE id = $1`, second.ID))
 	e.assertInvariants()
+}
+
+// ============================================ invariants as live metrics
+
+func (e *env) checker(checks []invariants.Check, timeout time.Duration) (*worker.InvariantChecker, *metrics.Metrics) {
+	m := metrics.NewWorker()
+	c := &worker.InvariantChecker{
+		Store:   &invariants.Store{Pool: e.pool, Checks: checks, StatementTimeout: timeout},
+		Metrics: m, Logger: e.logger,
+	}
+	c.Init()
+	return c, m
+}
+
+// A clean database: every invariant gauge is 0, and every check succeeded.
+func TestInvariants_CleanDatabaseReportsZero(t *testing.T) {
+	e := setup(t, 2)
+	e.abandonAfterTimeout("alice", 0) // some real data: a hold + a PENDING payment
+	c, m := e.checker(invariants.Checks, 2*time.Second)
+
+	res := e.runOnce(c)
+
+	assert.Equal(t, len(invariants.Checks), res.Succeeded)
+	for _, check := range invariants.Checks {
+		assert.Equal(t, 0.0, testutil.ToFloat64(m.InvariantViolations.WithLabelValues(check.Name)), check.Name)
+		assert.Greater(t, testutil.ToFloat64(m.InvariantLastSuccess.WithLabelValues(check.Name)), 0.0, check.Name)
+	}
+	assert.Equal(t, 1.0, testutil.ToFloat64(m.HoldsActive))
+	assert.Greater(t, testutil.ToFloat64(m.PaymentsPendingOldestAge), 0.0)
+}
+
+// A deliberate violation (a booking with no SUCCEEDED payment, inserted
+// behind the application's back) makes its gauge non-zero, which is what
+// fires the DoubleBookingDetected alert.
+func TestInvariants_DeliberateViolationIsReported(t *testing.T) {
+	e := setup(t, 1)
+	e.exec(`INSERT INTO holds (show_id, seat_id, user_id, status, expires_at) VALUES ($1, $2, 'mallory', 'CONSUMED', NOW())`, e.showID, e.seatIDs[0])
+	e.exec(`INSERT INTO bookings (show_id, seat_id, user_id, hold_id) SELECT show_id, seat_id, user_id, id FROM holds`)
+	c, m := e.checker(invariants.Checks, 2*time.Second)
+
+	e.runOnce(c)
+
+	assert.Equal(t, 1.0, testutil.ToFloat64(m.InvariantViolations.WithLabelValues("booking_without_payment")),
+		"a booking nobody paid for is detected")
+	assert.Equal(t, 0.0, testutil.ToFloat64(m.InvariantViolations.WithLabelValues("double_booking")))
+}
+
+// A check that cannot run (here: it hits the statement timeout) must NOT
+// look healthy: the gauge keeps its last value, the error counter goes up,
+// and last-success does not move.
+func TestInvariants_FailingCheckKeepsLastValueAndCountsError(t *testing.T) {
+	e := setup(t, 1)
+	good := []invariants.Check{{Name: "probe", SQL: "SELECT 1"}} // 1 "violating" row
+	c, m := e.checker(good, 2*time.Second)
+	e.runOnce(c)
+	require.Equal(t, 1.0, testutil.ToFloat64(m.InvariantViolations.WithLabelValues("probe")))
+	lastSuccess := testutil.ToFloat64(m.InvariantLastSuccess.WithLabelValues("probe"))
+
+	c.Store.Checks = []invariants.Check{{Name: "probe", SQL: "SELECT pg_sleep(5)"}}
+	c.Store.StatementTimeout = 200 * time.Millisecond
+	res, err := c.RunOnce(context.Background())
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, res.Failed)
+	assert.Equal(t, 1.0, testutil.ToFloat64(m.InvariantCheckErrors.WithLabelValues("probe")), "the error is counted")
+	assert.Equal(t, 1.0, testutil.ToFloat64(m.InvariantViolations.WithLabelValues("probe")), "the gauge is NOT reset to 0")
+	assert.Equal(t, lastSuccess, testutil.ToFloat64(m.InvariantLastSuccess.WithLabelValues("probe")), "last success does not move")
 }

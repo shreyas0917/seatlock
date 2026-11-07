@@ -10,7 +10,7 @@ SWAG_VERSION  := v1.16.4
 # Extra flags for go test, e.g. `make test TEST_FLAGS=-race` (CI does this on Linux).
 TEST_FLAGS    ?=
 
-.PHONY: up up-demo down logs run test test-integration verify migrate-up migrate-down seed reset-data outbox-retry swagger lint
+.PHONY: up up-demo down logs run test test-integration verify verify-sql migrate-up migrate-down seed reset-data outbox-retry swagger lint
 
 ## up: build the API image and start postgres, redis and api in the background
 up:
@@ -73,6 +73,11 @@ reset-data:
 outbox-retry:
 	@test -n "$(ID)" || (echo "usage: make outbox-retry ID=<outbox id>"; exit 1)
 	docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U $(POSTGRES_USER) -d $(POSTGRES_DB) -c "UPDATE outbox SET status = 'PENDING', attempts = 0, next_attempt_at = NOW() WHERE id = $(ID) AND status = 'FAILED' RETURNING id, kind, status"
+
+## verify-sql: regenerate demo/verify.sql from internal/invariants/checks.go
+##             (the single source of the invariant checks; a test fails if they differ)
+verify-sql:
+	go test -count=1 -run TestVerifySQLMatchesTheGoChecks ./internal/invariants/ -update
 
 ## swagger: regenerate the OpenAPI docs in ./docs from the handler annotations
 ##          (needs the swag CLI once: go install github.com/swaggo/swag/cmd/swag@v1.16.4)

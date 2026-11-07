@@ -95,6 +95,9 @@ type Config struct {
 	// Idempotency key cleanup: deletes COMPLETED keys older than IdempotencyRetention.
 	CleanupInterval      time.Duration
 	IdempotencyRetention time.Duration
+	// Invariant checks (verify.sql as live gauges) and their per-query timeout.
+	InvariantsInterval        time.Duration
+	InvariantStatementTimeout time.Duration
 	// PaymentTimeout caps one call to the gateway. When it fires, the outcome
 	// of a charge is UNKNOWN (the payment stays PENDING, 504 to the client).
 	PaymentTimeout time.Duration
@@ -168,6 +171,8 @@ func Load() (Config, error) {
 		{"EXPIRE_INTERVAL", 10 * time.Second, &cfg.ExpireInterval},
 		{"CLEANUP_INTERVAL", time.Hour, &cfg.CleanupInterval},
 		{"IDEMPOTENCY_RETENTION", 24 * time.Hour, &cfg.IdempotencyRetention},
+		{"INVARIANTS_INTERVAL", 15 * time.Second, &cfg.InvariantsInterval},
+		{"INVARIANT_STATEMENT_TIMEOUT", 2 * time.Second, &cfg.InvariantStatementTimeout},
 	}
 	for _, d := range durations {
 		value, err := getDuration(d.key, d.fallback)
