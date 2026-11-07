@@ -21,7 +21,9 @@ const sample = `{"root_group":{},"metrics":{
  "http_req_duration{endpoint:confirm}":{"med":110,"p(95)":160,"p(99)":190,"count":100},
  "hold_to_booked":{"med":130,"p(95)":200,"p(99)":240,"count":100},
  "bookings_ok":{"count":100,"rate":9},
- "unexpected_status":{"count":10,"rate":1}
+ "unexpected_status":{"count":10,"rate":1},
+ "http_req_duration{endpoint:hold,phase:recovery}":{"med":5,"p(95)":9,"p(99)":15,"count":300},
+ "unexpected_status{phase:spike}":{"count":2,"rate":0}
 }}`
 
 func TestSummarize(t *testing.T) {
@@ -39,10 +41,26 @@ func TestSummarize(t *testing.T) {
 	assert.Equal(t, 0, r.Counters["shed_503"], "a metric missing from the export is 0")
 	assert.InDelta(t, 100*10/5100.0, r.Unexpected, 1e-9)
 	assert.Equal(t, 240.0, r.HoldToBook["p99"])
+	require.Contains(t, r.Phases, "recovery")
+	assert.Equal(t, 9.0, r.Phases["recovery"].Endpoints["hold"].P95)
+	assert.Equal(t, 2, r.Phases["spike"].Unexpected)
 
 	var buf bytes.Buffer
 	Print(&buf, r)
 	assert.Contains(t, buf.String(), "201:100 409:4890 503:10")
+}
+
+func TestGet(t *testing.T) {
+	doc := []byte(`{"counters":{"bookings_ok":100},"phases":{"recovery":{"endpoints":{"hold":{"p95_ms":9.5}}}}}`)
+	for path, want := range map[string]string{
+		"counters.bookings_ok":                  "100",
+		"phases.recovery.endpoints.hold.p95_ms": "9.5",
+		"phases.spike.endpoints.hold.p95_ms":    "",
+	} {
+		got, err := Get(doc, path)
+		require.NoError(t, err)
+		assert.Equal(t, want, got, path)
+	}
 }
 
 func TestOf_MedianMinMax(t *testing.T) {

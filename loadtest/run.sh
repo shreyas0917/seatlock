@@ -6,15 +6,17 @@
 #
 #   RUNS default 1. Each run: reset data + gateway -> 15 s warm-up -> reset
 #   again -> measured k6 run (k6 in Docker, INSIDE the Compose network, so the
-#   Windows/macOS host port proxy is not what gets measured) -> checks:
+#   Windows/macOS host port proxy is not what gets measured) -> checks
+#   (loadtest/k6lib.sh correctness_checks):
 #     1. time to consistency: 0 PENDING payments and 0 PENDING outbox rows
 #     2. bookings in Postgres == bookings k6 saw (and == seats, for rush/smoke)
 #     3. gateway: charges that took money == bookings + refunds, <= 1 per key
 #     4. demo/verify.sql: every check 0 rows
 #     5. Prometheus: a FRESH invariant run reports all 11 checks, max 0
-#     6. k6 thresholds held (unexpected_status == 0 where required)
-#   It also samples `docker stats` (k6 itself, api, postgres, redis...) for
-#   the whole run: k6 shares the CPUs with the system under test.
+#   plus k6's thresholds, no HTTP 500, and per scenario: spike recovery,
+#   soak "nothing grows". It samples `docker stats` (k6 itself, api,
+#   postgres, redis...) for the whole run: k6 shares the CPUs with the
+#   system under test.
 #
 # Env: K6_ENV="CAP_RATE=400 X=1" (extra k6 -e vars), BASE_URL (default
 # http://api:8080), OUT_DIR, SKIP_WARMUP=1, NETWORK (default seatlock_default).
@@ -23,13 +25,11 @@ set -u
 cd "$(dirname "$0")/.." || exit 1
 # shellcheck source=../demo/lib.sh
 source demo/lib.sh
+# shellcheck source=k6lib.sh
+source loadtest/k6lib.sh
 
-K6_IMAGE="grafana/k6:0.54.0"
 SCENARIO="${1:?usage: loadtest/run.sh <rush|capacity|spike|soak|smoke> [runs]}"
 RUNS="${2:-${RUNS:-1}}"
-BASE_URL="${BASE_URL:-http://api:8080}"
-NETWORK="${NETWORK:-seatlock_default}"
-K6_ENV="${K6_ENV:-}"
 
 # Active duration of each scenario (for RPS) and the exact booking count, if any.
 EXPECT_SHOW="" EXPECT_BOOKINGS="" STRICT=1
@@ -44,47 +44,9 @@ esac
 
 OUT_DIR="${OUT_DIR:-tmp/loadtest/$SCENARIO-$(date +%Y%m%d-%H%M%S)}"
 mkdir -p "$OUT_DIR"
-# Docker on Windows needs a Windows path for the bind mount (Git Bash: pwd -W).
-HOST_DIR="$(pwd -W 2>/dev/null || pwd)"
-export MSYS_NO_PATHCONV=1
-
-k6() { # k6 <script> <summary-file|""> [extra args...]
-  local script="$1" summary="$2"; shift 2
-  local args=(run -q -e "BASE_URL=$BASE_URL" -e "RUN_ID=$(date +%s%N | cut -c1-13)")
-  for kv in $K6_ENV; do args+=(-e "$kv"); done
-  [ -n "$summary" ] && args+=(--summary-export "/out/$(basename "$summary")")
-  docker rm -f seatlock-k6 > /dev/null 2>&1
-  docker run --rm --name seatlock-k6 --network "$NETWORK" \
-    -v "$HOST_DIR/loadtest:/scripts:ro" -v "$HOST_DIR/$OUT_DIR:/out" \
-    "$K6_IMAGE" "${args[@]}" "$@" "/scripts/$script"
-}
-
-reset_all() {
-  make -s reset-data > /dev/null 2>&1 || { echo "reset-data failed (is the stack up?)"; exit 1; }
-  mock_reset
-}
-
-# sample_stats FILE: one `docker stats` snapshot every ~2 s until killed.
-sample_stats() {
-  while true; do
-    docker stats --no-stream --format '{{.Name}},{{.CPUPerc}},{{.MemUsage}}' 2>/dev/null \
-      | grep -E 'seatlock' | sed "s/^/$(date +%H:%M:%S),/" >> "$1"
-  done
-}
-
-# peaks FILE: peak CPU% and memory per container.
-peaks() {
-  awk -F, '{
-      name=$2; cpu=$3; sub(/%/,"",cpu); split($4, m, " / "); mem=m[1]; v=mem+0
-      if (mem ~ /GiB/) v*=1024; else if (mem ~ /KiB/) v/=1024; else if (mem ~ /[^i]B$/ && mem !~ /MiB/) v/=1048576
-      if (cpu+0 > c[name]) c[name]=cpu+0; if (v > mm[name]) mm[name]=v; n[name]++
-    } END { for (k in c) printf "  %-28s peak CPU %6.1f%%  peak mem %7.1f MiB  (%d samples)\n", k, c[k], mm[k], n[k] }' "$1" | sort
-}
-
-result_value() { grep -oE "\"$2\": [0-9.]+" "$1" | head -1 | awk '{print $2}'; }
 
 {
-  echo "=== loadtest/run.sh $SCENARIO, $RUNS run(s), K6_ENV='$K6_ENV', $(date)"
+  echo "=== loadtest/run.sh $SCENARIO, $RUNS run(s), K6_ENV='$K6_ENV', BASE_URL=$BASE_URL, $(date)"
   ./loadtest/env.sh
 } | tee "$OUT_DIR/env.txt"
 
@@ -110,66 +72,59 @@ for i in $(seq 1 "$RUNS"); do
   end=$(date +%s)
   echo "  k6 exit code $k6_rc ($((end - start))s wall clock), log $RUN.k6.log"
   if [ ! -s "$RUN.json" ]; then
-    fail "k6 wrote no summary"; tail -20 "$RUN.k6.log"; continue
+    fail "k6 wrote no summary"; tail -20 "$RUN.k6.log"; echo FAIL > "$RUN.verdict"; continue
   fi
   go run ./loadtest/report -duration "$DURATION" "$RUN.json" | sed 's/^/  /'
 
   echo "  --- checks"
-  # 1. time to consistency
-  t0=$(date +%s) consistent=""
-  while [ $(( $(date +%s) - t0 )) -lt 300 ]; do
-    pend="$(sql "SELECT (SELECT COUNT(*) FROM payments WHERE status = 'PENDING') + (SELECT COUNT(*) FROM outbox WHERE status = 'PENDING')" | tr -d '[:space:]')"
-    if [ "$pend" = "0" ]; then consistent=$(( $(date +%s) - t0 )); break; fi
-    sleep 2
-  done
-  if [ -n "$consistent" ]; then pass "time to consistency: ${consistent}s (0 PENDING payments, 0 PENDING outbox rows)"
-  else fail "still $pend PENDING payments/outbox rows after 300s"; fi
+  correctness_checks "$RUN" "$EXPECT_SHOW" "$EXPECT_BOOKINGS"
 
-  # 2. bookings
-  db_bookings="$(sql 'SELECT COUNT(*) FROM bookings' | tr -d '[:space:]')"
-  k6_bookings="$(result_value "$RUN.result.json" bookings_ok)"
-  if [ "$db_bookings" = "$k6_bookings" ]; then pass "bookings in Postgres ($db_bookings) == bookings k6 saw ($k6_bookings)"
-  else fail "bookings in Postgres $db_bookings != bookings k6 saw $k6_bookings"; fi
-  if [ -n "$EXPECT_SHOW" ]; then
-    expect_sql "SELECT COUNT(*) FROM bookings b JOIN shows s ON s.id = b.show_id WHERE s.title = '$EXPECT_SHOW'" "$EXPECT_BOOKINGS" "bookings on '$EXPECT_SHOW'"
+  # spike: latency must come back to the baseline after the spike.
+  if [ "$SCENARIO" = "spike" ]; then
+    base_p95="$(result_get "$RUN.result.json" phases.baseline.endpoints.hold.p95_ms)"
+    peak_p95="$(result_get "$RUN.result.json" phases.spike.endpoints.hold.p95_ms)"
+    rec_p95="$(result_get "$RUN.result.json" phases.recovery.endpoints.hold.p95_ms)"
+    # Recovered = recovery p95 <= 1.5 x baseline p95 + 5 ms (tiny numbers are noisy).
+    if awk -v b="$base_p95" -v r="$rec_p95" 'BEGIN { exit !(b > 0 && r > 0 && r <= 1.5 * b + 5) }'; then
+      pass "spike: hold p95 recovered (baseline ${base_p95} ms, spike ${peak_p95} ms, recovery ${rec_p95} ms)"
+    else
+      fail "spike: hold p95 did not recover (baseline '${base_p95}' ms, spike '${peak_p95}' ms, recovery '${rec_p95}' ms)"
+    fi
   fi
 
-  # 3. gateway
-  stats="$(curl -fsS "$MOCK_URL/debug/stats")"
-  taken="$(echo "$stats" | grep -oE '"money_taken_charges":[0-9]+' | cut -d: -f2)"
-  refunds="$(echo "$stats" | grep -oE '"total_refunds":[0-9]+' | cut -d: -f2)"
-  max_per_key="$(echo "$stats" | grep -oE '"charges_created":\{[^}]*\}' | grep -oE ':[0-9]+' | tr -d : | sort -n | tail -1)"
-  if [ "$taken" = "$((db_bookings + refunds))" ]; then pass "gateway: charges that took money ($taken) == bookings ($db_bookings) + refunds ($refunds)"
-  else fail "gateway: charges that took money $taken != bookings $db_bookings + refunds $refunds"; fi
-  if [ "${max_per_key:-0}" -le 1 ]; then pass "gateway: at most 1 charge per idempotency key"; else fail "a key was charged $max_per_key times"; fi
-
-  # 4. verify.sql
-  vout="$(docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U "$PG_USER" -d "$PG_DB" < demo/verify.sql)"
-  echo "$vout" > "$RUN.verify.txt"
-  checks="$(echo "$vout" | grep -c '^CHECK')"; zero="$(echo "$vout" | grep -c '^(0 rows)')"
-  if [ "$checks" -gt 0 ] && [ "$checks" = "$zero" ]; then pass "verify.sql: all $checks checks returned 0 rows"
-  else fail "verify.sql: only $zero of $checks checks returned 0 rows (see $RUN.verify.txt)"; fi
-
-  # 5. Prometheus: wait for an invariant run that STARTED after the checks above began.
-  fresh=""
-  for _ in $(seq 1 30); do
-    last="$(prom_value 'min(seatlock_invariant_last_success_timestamp_seconds)')"
-    if [ -n "$last" ] && [ "${last%%.*}" -gt "$t0" ]; then fresh=1; break; fi
-    sleep 2
-  done
-  if [ -n "$fresh" ]; then
-    expect_prom 'count(seatlock_invariant_violations)' -eq 11 "Prometheus: invariant checks reporting"
-    expect_prom 'max(seatlock_invariant_violations)' -eq 0 "Prometheus: largest invariant violation count"
-  else
-    fail "Prometheus: no fresh invariant run within 60s"
+  # soak: nothing may grow. Compare Prometheus averages over minutes 2-4 of
+  # the run with the last 2 minutes (the first 2 minutes are warm-up).
+  if [ "$SCENARIO" = "soak" ]; then
+    early=$((start + 240)) late="$end"
+    prom_at() { curl -fsS -G "$PROM_URL/api/v1/query" --data-urlencode "query=$1" --data-urlencode "time=$2" \
+      | grep -oE '"value":\[[0-9.e+]+,"[^"]*"\]' | head -n 1 | sed -E 's/.*,"([^"]*)"\]/\1/'; }
+    # name | PromQL | allowed growth: end <= start * factor + slack
+    while IFS='|' read -r name query factor slack; do
+      a="$(prom_at "avg_over_time(($query)[2m:15s])" "$early")"; z="$(prom_at "avg_over_time(($query)[2m:15s])" "$late")"
+      if awk -v a="$a" -v z="$z" -v f="$factor" -v s="$slack" 'BEGIN { exit !(a != "" && z != "" && z <= a * f + s) }'; then
+        pass "soak: $name flat (minutes 2-4: $(printf '%.1f' "$a"), last 2 min: $(printf '%.1f' "$z"))"
+      else
+        fail "soak: $name grew (minutes 2-4: '${a}', last 2 min: '${z}', allowed x$factor + $slack)"
+      fi
+    done << 'EOF'
+api heap in use (MiB)|go_memstats_heap_inuse_bytes{job="api"} / 1048576|1.3|8
+api goroutines|go_goroutines{job="api"}|1.3|20
+worker heap in use (MiB)|go_memstats_heap_inuse_bytes{job="worker"} / 1048576|1.3|8
+worker goroutines|go_goroutines{job="worker"}|1.3|20
+api DB connections (open)|sum(seatlock_db_pool_connections{job="api",state="total"})|1.0|5
+api Redis connections (open)|sum(seatlock_redis_pool_connections{job="api",state="total"})|1.0|5
+PENDING outbox rows|sum(seatlock_outbox_rows{status="PENDING"}) or vector(0)|1.0|10
+oldest PENDING payment (s)|max(seatlock_payments_pending_oldest_age_seconds) or vector(0)|1.0|30
+EOF
+    echo "  (soak ran $((end - start))s)"
   fi
 
-  # 6. k6 thresholds (unexpected_status, dropped_iterations, ...) and 500s
-  if [ "$k6_rc" -eq 0 ]; then pass "k6 thresholds held"; else fail "k6 thresholds failed (exit $k6_rc): $(grep -E '✗|thresholds' "$RUN.k6.log" | head -5 | tr '\n' ' ')"; fi
-  s500="$(result_value "$RUN.result.json" status_500)"
+  # k6 thresholds (unexpected_status, dropped_iterations, status_500 ...)
+  if [ "$k6_rc" -eq 0 ]; then pass "k6 thresholds held"; else fail "k6 thresholds failed (exit $k6_rc): $(grep -E '✗' "$RUN.k6.log" | head -5 | tr -s ' ' | tr '\n' ' ')"; fi
+  s500="$(result_get "$RUN.result.json" counters.status_500)"
   if [ "${s500:-0}" = "0" ]; then pass "no HTTP 500 responses"; else fail "$s500 HTTP 500 responses: a bug, investigate"; fi
   if [ "$STRICT" = "1" ]; then
-    unx="$(result_value "$RUN.result.json" unexpected_status)"
+    unx="$(result_get "$RUN.result.json" counters.unexpected_status)"
     if [ "${unx:-0}" = "0" ]; then pass "unexpected_status == 0"; else fail "unexpected_status = $unx"; fi
   fi
 
@@ -182,6 +137,6 @@ echo
 if [ "$RUNS" -gt 1 ]; then
   go run ./loadtest/report -median "$OUT_DIR"/run*.result.json | tee "$OUT_DIR/median.txt"
 fi
-verdicts="$(cat "$OUT_DIR"/run*.verdict 2>/dev/null | sort | uniq -c | tr '\n' ' ')"
-echo "=== $SCENARIO: $verdicts— results in $OUT_DIR"
-! grep -q FAIL "$OUT_DIR"/run*.verdict 2>/dev/null
+verdicts="$(cat "$OUT_DIR"/run*.verdict 2> /dev/null | sort | uniq -c | tr -s ' ' | tr '\n' ' ')"
+echo "=== $SCENARIO:$verdicts— results in $OUT_DIR"
+! grep -q FAIL "$OUT_DIR"/run*.verdict 2> /dev/null

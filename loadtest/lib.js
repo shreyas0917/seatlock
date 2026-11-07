@@ -51,9 +51,11 @@ export function baseOptions(extra) {
   return Object.assign(
     {
       summaryTrendStats: ['avg', 'min', 'med', 'max', 'p(90)', 'p(95)', 'p(99)', 'count'],
-      // Each VU keeps its connection: like real browsers/app clients.
-      noConnectionReuse: false,
-      discardResponseBodies: false,
+      // k6 must not become the bottleneck: response bodies are DISCARDED by
+      // default (a 200-seat map is ~15 KB that k6 would otherwise keep and
+      // process) and read only where the script needs them (hold id, error
+      // codes): those requests set responseType 'text'.
+      discardResponseBodies: true,
     },
     extra,
     { thresholds: Object.assign(thresholds, (extra && extra.thresholds) || {}) },
@@ -94,7 +96,11 @@ function errorCode(res) {
 // classify records the status metrics and returns 'expected' | 'shed' | 'unexpected'.
 function classify(endpoint, res, policy) {
   const status = res.status;
-  const code = status >= 400 ? errorCode(res) : '';
+  let code = status >= 400 ? errorCode(res) : '';
+  // Seat-map bodies are discarded (see baseOptions), so their error code is
+  // unknown. On reads SeatLock's ONLY 503 is SERVICE_BUSY (reads never touch
+  // Redis, and nginx answers 502, not 503, when an upstream is down).
+  if (endpoint === 'seats' && status === 503 && code === '') code = 'SERVICE_BUSY';
   responses.add(1, { endpoint, status: String(status) });
 
   if (status === 500) status500.add(1, { endpoint });
@@ -134,6 +140,8 @@ const JSON_HEADERS = { 'Content-Type': 'application/json' };
 
 // ---- API calls -------------------------------------------------------------
 export function seatMap(showId, policy) {
+  // The body is not needed (discarded); an error's code is not needed either:
+  // a non-200 seat map is unexpected whatever its code.
   const res = http.get(`${BASE}/v1/shows/${showId}/seats`, {
     tags: { endpoint: 'seats', name: 'GET /v1/shows/{showID}/seats' },
   });
@@ -147,6 +155,7 @@ export function holdSeat(showId, seatId, user, policy) {
   const res = http.post(`${BASE}/v1/holds`, JSON.stringify({ show_id: showId, seat_id: seatId }), {
     headers: Object.assign({ 'X-User-ID': user }, JSON_HEADERS),
     tags: { endpoint: 'hold', name: 'POST /v1/holds' },
+    responseType: 'text',
   });
   classify('hold', res, policy);
   let holdId = 0;
@@ -166,6 +175,7 @@ export function confirm(holdId, user, key, policy, started, retries) {
     http.post(`${BASE}/v1/bookings`, JSON.stringify({ hold_id: holdId }), {
       headers: Object.assign({ 'X-User-ID': user, 'Idempotency-Key': key }, JSON_HEADERS),
       tags: { endpoint: 'confirm', name: 'POST /v1/bookings' },
+      responseType: 'text',
     });
   let res = send();
   for (let i = 0; i < (retries || 0) && isRetryable(res); i++) {
@@ -189,6 +199,7 @@ export function cancel(holdId, user, policy) {
   const res = http.del(`${BASE}/v1/holds/${holdId}`, null, {
     headers: { 'X-User-ID': user },
     tags: { endpoint: 'cancel', name: 'DELETE /v1/holds/{holdID}' },
+    responseType: 'text',
   });
   classify('cancel', res, policy);
   return res.status;
@@ -196,22 +207,36 @@ export function cancel(holdId, user, policy) {
 
 // ---- setup helpers (tagged "setup", excluded from every reported number) ----
 export function findShows(prefix) {
-  const res = http.get(`${BASE}/v1/shows`, { tags: { endpoint: 'setup' } });
+  const res = http.get(`${BASE}/v1/shows`, { tags: { endpoint: 'setup' }, responseType: 'text' });
   if (res.status !== 200) throw new Error(`GET /v1/shows -> ${res.status}`);
   return res.json('shows').filter((s) => s.title.startsWith(prefix));
 }
 
 export function seatIds(showId) {
-  const res = http.get(`${BASE}/v1/shows/${showId}/seats`, { tags: { endpoint: 'setup' } });
+  const res = http.get(`${BASE}/v1/shows/${showId}/seats`, { tags: { endpoint: 'setup' }, responseType: 'text' });
   if (res.status !== 200) throw new Error(`GET seats of show ${showId} -> ${res.status}`);
   return res.json('seats').map((s) => s.id);
 }
 
-// steadyShows returns [{ id, seats: [ids] }] for the 200 'Load: Steady N' shows.
+// steadyShows returns [{ id, first, count }] for the 200 'Load: Steady N'
+// shows. Setup data is copied into EVERY VU, so it is kept tiny: each show's
+// seat ids are a contiguous range (load.sql inserts them in one ordered
+// statement), checked here, so a seat is first + random(count) instead of
+// 40,000 ids parsed by hundreds of VUs.
 export function steadyShows() {
   const shows = findShows('Load: Steady ');
   if (shows.length === 0) throw new Error('no "Load: Steady" shows: run `make seed-load`');
-  return shows.map((s) => ({ id: s.id, seats: seatIds(s.id) }));
+  return shows.map((s) => {
+    const ids = seatIds(s.id).sort((a, b) => a - b);
+    if (ids.length === 0 || ids[ids.length - 1] - ids[0] + 1 !== ids.length) {
+      throw new Error(`seat ids of show ${s.id} are not contiguous: re-create the load data`);
+    }
+    return { id: s.id, first: ids[0], count: ids.length };
+  });
+}
+
+function randomSeat(show) {
+  return show.first + Math.floor(Math.random() * show.count);
 }
 
 export function pick(arr) {
@@ -219,18 +244,20 @@ export function pick(arr) {
 }
 
 // One "user action" of the realistic mix (capacity, spike, soak):
-//   70% read a seat map; 30% hold a random seat, then on 201 confirm (half)
-//   or cancel (half, so the seat comes back).
-export function mixedAction(shows, policy, confirmRetriesN) {
+//   70% read a seat map; 30% hold a random seat, then on 201 confirm
+//   (confirmShare of the holds, default half) or cancel (the rest, so the
+//   seat comes back). Booked seats never come back, so a long run (soak)
+//   books a smaller share to not run out of the 40,000 seats.
+export function mixedAction(shows, policy, confirmRetriesN, confirmShare) {
   const show = pick(shows);
   if (Math.random() < 0.7) {
     seatMap(show.id, policy);
     return;
   }
   const user = userId();
-  const h = holdSeat(show.id, pick(show.seats), user, policy);
+  const h = holdSeat(show.id, randomSeat(show), user, policy);
   if (h.status !== 201) return;
-  if (Math.random() < 0.5) {
+  if (Math.random() < (confirmShare === undefined ? 0.5 : confirmShare)) {
     confirm(h.holdId, user, newIdempotencyKey(user), policy, h.started, confirmRetriesN);
   } else {
     cancel(h.holdId, user, policy);

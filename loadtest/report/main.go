@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -51,7 +52,20 @@ type Result struct {
 	Unexpected  float64              `json:"unexpected_pct"`
 	Shed        float64              `json:"shed_pct"`
 	ShedPlusUnx float64              `json:"shed_plus_unexpected_pct"`
+	// Phases: per-phase latency (spike.js tags baseline / spike / recovery).
+	Phases map[string]*Phase `json:"phases,omitempty"`
 }
+
+// Phase is one phase of a run: latency per endpoint and unexpected statuses.
+type Phase struct {
+	Endpoints  map[string]*Endpoint `json:"endpoints"`
+	Unexpected int                  `json:"unexpected"`
+}
+
+var (
+	phaseMetric     = regexp.MustCompile(`^http_req_duration\{endpoint:(\w+),phase:(\w+)\}$`)
+	phaseUnexpected = regexp.MustCompile(`^unexpected_status\{phase:(\w+)\}$`)
+)
 
 type metric map[string]any
 
@@ -101,6 +115,23 @@ func Summarize(r io.Reader, duration time.Duration) (Result, error) {
 	if h := get("hold_to_booked"); h.num("count") > 0 {
 		res.HoldToBook = map[string]float64{"p50": h.num("med"), "p95": h.num("p(95)"), "p99": h.num("p(99)")}
 	}
+	phase := func(name string) *Phase {
+		if res.Phases == nil {
+			res.Phases = map[string]*Phase{}
+		}
+		if res.Phases[name] == nil {
+			res.Phases[name] = &Phase{Endpoints: map[string]*Endpoint{}}
+		}
+		return res.Phases[name]
+	}
+	for name, m := range export.Metrics {
+		if g := phaseMetric.FindStringSubmatch(name); g != nil && m.num("count") > 0 {
+			phase(g[2]).Endpoints[g[1]] = &Endpoint{Count: int(m.num("count")), P50: m.num("med"), P95: m.num("p(95)"), P99: m.num("p(99)")}
+		}
+		if g := phaseUnexpected.FindStringSubmatch(name); g != nil {
+			phase(g[1]).Unexpected = int(m.num("count"))
+		}
+	}
 	if res.Responses > 0 {
 		res.Unexpected = 100 * float64(res.Counters["unexpected_status"]) / float64(res.Responses)
 		res.Shed = 100 * float64(res.Counters["shed_503"]) / float64(res.Responses)
@@ -134,6 +165,19 @@ func Print(w io.Writer, r Result) {
 	fmt.Fprintln(w, strings.Join(parts, " "))
 	if r.HoldToBook != nil {
 		fmt.Fprintf(w, "hold->booked ms: p50 %.1f  p95 %.1f  p99 %.1f\n", r.HoldToBook["p50"], r.HoldToBook["p95"], r.HoldToBook["p99"])
+	}
+	for _, name := range []string{"baseline", "spike", "recovery"} {
+		p, ok := r.Phases[name]
+		if !ok {
+			continue
+		}
+		fmt.Fprintf(w, "phase %-9s unexpected %d", name, p.Unexpected)
+		for _, e := range endpoints {
+			if ep, ok := p.Endpoints[e]; ok {
+				fmt.Fprintf(w, "  %s p50 %.1f p95 %.1f p99 %.1f", e, ep.P50, ep.P95, ep.P99)
+			}
+		}
+		fmt.Fprintln(w)
 	}
 }
 
@@ -208,7 +252,20 @@ func PrintMedian(w io.Writer, runs []Result) {
 func main() {
 	duration := flag.Duration("duration", 0, "active duration of the scenario (for RPS), e.g. 10s")
 	median := flag.Bool("median", false, "aggregate several .result.json files")
+	get := flag.String("get", "", "print one value of a .result.json, e.g. phases.recovery.endpoints.hold.p95_ms")
 	flag.Parse()
+	if *get != "" && flag.NArg() == 1 {
+		b, err := os.ReadFile(flag.Arg(0))
+		if err != nil {
+			fail(err)
+		}
+		v, err := Get(b, *get)
+		if err != nil {
+			fail(err)
+		}
+		fmt.Println(v)
+		return
+	}
 	if flag.NArg() == 0 {
 		fmt.Fprintln(os.Stderr, "usage: report -duration 10s summary.json | report -median a.result.json b.result.json ...")
 		os.Exit(2)
@@ -247,6 +304,28 @@ func main() {
 	if err := os.WriteFile(strings.TrimSuffix(path, ".json")+".result.json", append(out, '\n'), 0o644); err != nil {
 		fail(err)
 	}
+}
+
+// Get returns the value at a dotted path of a JSON document ("" if missing),
+// so shell scripts can read a result without jq.
+func Get(doc []byte, path string) (string, error) {
+	var v any
+	if err := json.Unmarshal(doc, &v); err != nil {
+		return "", err
+	}
+	for _, key := range strings.Split(path, ".") {
+		m, ok := v.(map[string]any)
+		if !ok {
+			return "", nil
+		}
+		if v, ok = m[key]; !ok {
+			return "", nil
+		}
+	}
+	if f, ok := v.(float64); ok {
+		return fmt.Sprintf("%g", f), nil
+	}
+	return fmt.Sprint(v), nil
 }
 
 func fail(err error) {
