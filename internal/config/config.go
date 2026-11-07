@@ -73,6 +73,13 @@ type Config struct {
 	// :9092).
 	MetricsAddr string
 
+	// PprofBlockRate / PprofMutexFraction turn on Go's block and mutex
+	// profiles (served on the internal MetricsAddr port at /debug/pprof).
+	// 0 = off (default): sampling costs CPU, so enable them only while
+	// profiling, never for reported benchmark runs.
+	PprofBlockRate     int
+	PprofMutexFraction int
+
 	// PendingHoldMax: how long past its expiry a hold with an unresolved
 	// (PENDING) payment may keep blocking its seat. Used by the API and the
 	// worker alike (booking.Limits).
@@ -139,6 +146,18 @@ func Load() (Config, error) {
 	cfg.RedisAddr = getEnv("REDIS_ADDR", "localhost:6379")
 	cfg.PaymentURL = getEnv("PAYMENT_URL", "http://localhost:8095")
 	cfg.MetricsAddr = getEnv("METRICS_ADDR", "")
+	pprofBlock, err := getInt32("PPROF_BLOCK_RATE", 0)
+	if err != nil {
+		return Config{}, err
+	}
+	pprofMutex, err := getInt32("PPROF_MUTEX_FRACTION", 0)
+	if err != nil {
+		return Config{}, err
+	}
+	if pprofBlock < 0 || pprofMutex < 0 {
+		return Config{}, fmt.Errorf("PPROF_BLOCK_RATE and PPROF_MUTEX_FRACTION must be 0 (off) or positive")
+	}
+	cfg.PprofBlockRate, cfg.PprofMutexFraction = int(pprofBlock), int(pprofMutex)
 	if cfg.RedisPoolSize, err = getInt32("REDIS_POOL_SIZE", 10); err != nil {
 		return Config{}, err
 	}

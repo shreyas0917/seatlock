@@ -94,6 +94,9 @@ services:
       EXPIRE_INTERVAL: ${EXPIRE_INTERVAL:-10s}
       CLEANUP_INTERVAL: ${CLEANUP_INTERVAL:-1h}
       IDEMPOTENCY_RETENTION: ${IDEMPOTENCY_RETENTION:-24h}
+      # Block/mutex profiles at :9091|:9092/debug/pprof (internal ports). 0 = off.
+      PPROF_BLOCK_RATE: ${PPROF_BLOCK_RATE:-0}
+      PPROF_MUTEX_FRACTION: ${PPROF_MUTEX_FRACTION:-0}
     ports:
       - "8080:8080"
     # The api waits for a healthy Postgres (nothing works without it), but

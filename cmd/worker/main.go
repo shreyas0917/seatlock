@@ -113,14 +113,13 @@ func run() error {
 	logger.Info("worker starting",
 		"reconcile_after", cfg.ReconcileAfter.String(), "pending_hold_max", cfg.PendingHoldMax.String(),
 		"outbox_max_attempts", cfg.OutboxMaxAttempts, "batch_size", batch)
-	// /metrics on a separate internal port (default :9092), like the API.
+	// /metrics and /debug/pprof on a separate internal port (default :9092), like the API.
 	metricsAddr := cfg.MetricsAddr
 	if metricsAddr == "" {
 		metricsAddr = ":9092"
 	}
-	metricsMux := http.NewServeMux()
-	metricsMux.Handle("GET /metrics", m.Handler())
-	metricsServer := &http.Server{Addr: metricsAddr, Handler: metricsMux, ReadHeaderTimeout: 5 * time.Second}
+	metrics.EnableContentionProfiles(cfg.PprofBlockRate, cfg.PprofMutexFraction)
+	metricsServer := metrics.NewServer(metricsAddr, m)
 	go func() {
 		logger.Info("metrics server listening", "addr", metricsAddr)
 		if err := metricsServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

@@ -45,13 +45,6 @@ import (
 	"github.com/shreyas0917/seatlock/internal/payment"
 )
 
-// newMetricsServer serves only GET /metrics for the given registry.
-func newMetricsServer(addr string, m *metrics.Metrics) *http.Server {
-	mux := http.NewServeMux()
-	mux.Handle("GET /metrics", m.Handler())
-	return &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
-}
-
 // How long to wait for in-flight requests to finish during shutdown.
 const shutdownTimeout = 15 * time.Second
 
@@ -136,7 +129,8 @@ func run() error {
 	if metricsAddr == "" {
 		metricsAddr = ":9091"
 	}
-	metricsServer := newMetricsServer(metricsAddr, m)
+	metrics.EnableContentionProfiles(cfg.PprofBlockRate, cfg.PprofMutexFraction)
+	metricsServer := metrics.NewServer(metricsAddr, m) // /metrics + /debug/pprof
 	go func() {
 		logger.Info("metrics server listening", "addr", metricsAddr)
 		if err := metricsServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

@@ -679,6 +679,18 @@ func TestMetrics_NotOnThePublicRouter(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
+// pprof lives on the internal metrics port only (metrics.NewServer). The
+// public API must not serve it: it leaks stack traces and command-line
+// flags, and /debug/pprof/profile burns CPU on request.
+func TestPprof_NotOnThePublicRouter(t *testing.T) {
+	router, _ := newMetricsRouter(t)
+
+	for _, path := range []string{"/debug/pprof/", "/debug/pprof/profile", "/debug/pprof/heap", "/debug/pprof/goroutine", "/debug/pprof/cmdline"} {
+		rec := send(t, router, http.MethodGet, path, "", "")
+		assert.Equal(t, http.StatusNotFound, rec.Code, path)
+	}
+}
+
 // The metric reflects FAIL CLOSED: Redis unreachable -> the lock op is
 // counted as result="error" AND the hold is answered with 503.
 func TestMetrics_RedisLockErrorIsCountedAndHoldFailsClosed(t *testing.T) {

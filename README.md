@@ -259,7 +259,8 @@ make reset-data                      # free all seats (keeps shows/seats; clears
 | `EXPIRE_INTERVAL` | `10s` | Hold expirer |
 | `CLEANUP_INTERVAL` / `IDEMPOTENCY_RETENTION` | `1h` / `24h` | Idempotency key cleanup |
 | `INVARIANTS_INTERVAL` / `INVARIANT_STATEMENT_TIMEOUT` | `15s` / `2s` | Invariant checks as live gauges, and the max time per check query |
-| `METRICS_ADDR` | api `:9091`, worker `:9092` | Internal `/metrics` port (never the public API port) |
+| `METRICS_ADDR` | api `:9091`, worker `:9092` | Internal port for `/metrics` and `/debug/pprof` (never the public API port) |
+| `PPROF_BLOCK_RATE` / `PPROF_MUTEX_FRACTION` | `0` / `0` (off) | Go block and mutex profiles; turn on only while profiling |
 | `PROMETHEUS_PORT` / `GRAFANA_PORT` / `GRAFANA_ADMIN_PASSWORD` | `9095` / `3001` / `admin` | Observability (Grafana viewing needs no login) |
 | `PAYMENT_PORT` / `PAYMENT_FAIL_RATE` / `PAYMENT_MIN_DELAY` / `PAYMENT_MAX_DELAY` / `PAYMENT_SLOW_DELAY` | `8095` / `0` / `0s` / `0s` / `3s` | Mock gateway (demos) |
 
