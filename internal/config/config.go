@@ -67,6 +67,29 @@ type Config struct {
 	// a retry may take it over. Must be longer than one whole confirm
 	// (two transactions + PaymentTimeout).
 	IdempotencyLease time.Duration
+
+	// PendingHoldMax: how long past its expiry a hold with an unresolved
+	// (PENDING) payment may keep blocking its seat. Used by the API and the
+	// worker alike (booking.Limits).
+	PendingHoldMax time.Duration
+	// OutboxMaxAttempts: attempts before an outbox row becomes a FAILED dead letter.
+	OutboxMaxAttempts int32
+
+	// Worker (cmd/worker) settings. Each job claims at most WorkerBatchSize
+	// rows per run.
+	WorkerBatchSize int32
+	// Payment reconciler: checks PENDING payments older than ReconcileAfter.
+	ReconcileInterval time.Duration
+	ReconcileAfter    time.Duration
+	ReconcileLease    time.Duration
+	// Outbox drainer.
+	OutboxInterval time.Duration
+	OutboxLease    time.Duration
+	// Hold expirer.
+	ExpireInterval time.Duration
+	// Idempotency key cleanup: deletes COMPLETED keys older than IdempotencyRetention.
+	CleanupInterval      time.Duration
+	IdempotencyRetention time.Duration
 	// PaymentTimeout caps one call to the gateway. When it fires, the outcome
 	// of a charge is UNKNOWN (the payment stays PENDING, 504 to the client).
 	PaymentTimeout time.Duration
@@ -130,6 +153,15 @@ func Load() (Config, error) {
 		{"REDIS_LOCK_EXTRA", 10 * time.Second, &cfg.RedisLockExtra},
 		{"PAYMENT_TIMEOUT", 5 * time.Second, &cfg.PaymentTimeout},
 		{"IDEMPOTENCY_LEASE", 30 * time.Second, &cfg.IdempotencyLease},
+		{"PENDING_HOLD_MAX", 10 * time.Minute, &cfg.PendingHoldMax},
+		{"RECONCILE_INTERVAL", 30 * time.Second, &cfg.ReconcileInterval},
+		{"RECONCILE_AFTER", 2 * time.Minute, &cfg.ReconcileAfter},
+		{"RECONCILE_LEASE", 60 * time.Second, &cfg.ReconcileLease},
+		{"OUTBOX_INTERVAL", 5 * time.Second, &cfg.OutboxInterval},
+		{"OUTBOX_LEASE", 60 * time.Second, &cfg.OutboxLease},
+		{"EXPIRE_INTERVAL", 10 * time.Second, &cfg.ExpireInterval},
+		{"CLEANUP_INTERVAL", time.Hour, &cfg.CleanupInterval},
+		{"IDEMPOTENCY_RETENTION", 24 * time.Hour, &cfg.IdempotencyRetention},
 	}
 	for _, d := range durations {
 		value, err := getDuration(d.key, d.fallback)
@@ -142,7 +174,57 @@ func Load() (Config, error) {
 		*d.dst = value
 	}
 
+	if cfg.OutboxMaxAttempts, err = getInt32("OUTBOX_MAX_ATTEMPTS", 20); err != nil {
+		return Config{}, err
+	}
+	if cfg.WorkerBatchSize, err = getInt32("WORKER_BATCH_SIZE", 50); err != nil {
+		return Config{}, err
+	}
+	if cfg.OutboxMaxAttempts < 1 || cfg.WorkerBatchSize < 1 {
+		return Config{}, fmt.Errorf("OUTBOX_MAX_ATTEMPTS and WORKER_BATCH_SIZE must be at least 1")
+	}
+
 	return cfg, nil
+}
+
+// ValidateWorker checks that the worker's timings are SAFE together, and is
+// called by cmd/worker before it starts. Wrong values here do not just make
+// things slow, they make them WRONG, so the worker refuses to start:
+//
+//   - RECONCILE_AFTER > PAYMENT_TIMEOUT + IDEMPOTENCY_LEASE: the reconciler
+//     must never touch a payment whose own request may still be running
+//     (that request can last up to the payment timeout, and its client may
+//     retry within the idempotency lease).
+//   - PENDING_HOLD_MAX > RECONCILE_AFTER: the reconciler must get a chance to
+//     resolve a payment before its seat is handed to someone else.
+//   - RECONCILE_LEASE > 2 x PAYMENT_TIMEOUT + DB_QUERY_TIMEOUT: one check does
+//     up to two gateway calls (lookup, void) plus Tx B. If the lease ran out
+//     earlier, a second worker could claim the same payment mid-check.
+//   - OUTBOX_LEASE > PAYMENT_TIMEOUT + DB_QUERY_TIMEOUT: same, for one refund.
+//   - IDEMPOTENCY_RETENTION > IDEMPOTENCY_LEASE: never delete a key while its
+//     request could still be running.
+func (c Config) ValidateWorker() error {
+	checks := []struct {
+		ok   bool
+		rule string
+	}{
+		{c.ReconcileAfter > c.PaymentTimeout+c.IdempotencyLease,
+			fmt.Sprintf("RECONCILE_AFTER (%s) must be greater than PAYMENT_TIMEOUT + IDEMPOTENCY_LEASE (%s)", c.ReconcileAfter, c.PaymentTimeout+c.IdempotencyLease)},
+		{c.PendingHoldMax > c.ReconcileAfter,
+			fmt.Sprintf("PENDING_HOLD_MAX (%s) must be greater than RECONCILE_AFTER (%s)", c.PendingHoldMax, c.ReconcileAfter)},
+		{c.ReconcileLease > 2*c.PaymentTimeout+c.DBQueryTimeout,
+			fmt.Sprintf("RECONCILE_LEASE (%s) must be greater than 2 x PAYMENT_TIMEOUT + DB_QUERY_TIMEOUT (%s)", c.ReconcileLease, 2*c.PaymentTimeout+c.DBQueryTimeout)},
+		{c.OutboxLease > c.PaymentTimeout+c.DBQueryTimeout,
+			fmt.Sprintf("OUTBOX_LEASE (%s) must be greater than PAYMENT_TIMEOUT + DB_QUERY_TIMEOUT (%s)", c.OutboxLease, c.PaymentTimeout+c.DBQueryTimeout)},
+		{c.IdempotencyRetention > c.IdempotencyLease,
+			fmt.Sprintf("IDEMPOTENCY_RETENTION (%s) must be greater than IDEMPOTENCY_LEASE (%s)", c.IdempotencyRetention, c.IdempotencyLease)},
+	}
+	for _, check := range checks {
+		if !check.ok {
+			return fmt.Errorf("unsafe worker configuration: %s", check.rule)
+		}
+	}
+	return nil
 }
 
 // getDuration reads a Go duration such as "300s", "200ms" or "5m".

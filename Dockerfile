@@ -6,6 +6,7 @@
 # Targets:
 #   docker build .                   -> the SeatLock API (last stage = default)
 #   docker build --target payment .  -> the mock payment gateway
+#   docker build --target worker .   -> the background worker
 
 # ---------- build ----------
 FROM golang:1.26-alpine AS build
@@ -20,7 +21,8 @@ COPY . .
 # CGO_ENABLED=0 -> fully static binaries (no C libraries needed at runtime).
 # -ldflags="-s -w" strips debug symbols to make the binaries smaller.
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/api ./cmd/api \
- && CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/payment ./cmd/payment
+ && CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/payment ./cmd/payment \
+ && CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/worker ./cmd/worker
 
 # ---------- runtime base ----------
 FROM alpine:3.20 AS runtime
@@ -36,6 +38,11 @@ FROM runtime AS payment
 COPY --from=build /out/payment /usr/local/bin/payment
 EXPOSE 8090
 ENTRYPOINT ["/usr/local/bin/payment"]
+
+# ---------- background worker ----------
+FROM runtime AS worker
+COPY --from=build /out/worker /usr/local/bin/worker
+ENTRYPOINT ["/usr/local/bin/worker"]
 
 # ---------- API (default, because it is the last stage) ----------
 FROM runtime AS api

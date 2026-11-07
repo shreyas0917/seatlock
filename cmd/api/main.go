@@ -100,6 +100,8 @@ func run() error {
 	locker := lock.NewRedisLocker(redisClient, cfg.HoldTTL, cfg.RedisLockExtra)
 
 	repo := booking.NewPostgresRepository(pool, cfg.DBQueryTimeout)
+	// The same limits as the worker, so both apply the same rules.
+	repo.SetLimits(booking.Limits{PendingHoldMax: cfg.PendingHoldMax, OutboxMaxAttempts: int(cfg.OutboxMaxAttempts)})
 	// The payment gateway client. Confirm talks to it over HTTP; nothing in
 	// the confirm/payment path depends on Redis.
 	gateway := payment.NewClient(cfg.PaymentURL, cfg.PaymentTimeout)
