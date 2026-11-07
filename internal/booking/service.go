@@ -38,6 +38,7 @@ type Repository interface {
 	CreateHold(ctx context.Context, in HoldSeatInput, ttl time.Duration) (hold Hold, created bool, err error)
 	ReleaseHold(ctx context.Context, userID string, holdID int64) (hold Hold, outboxID int64, err error)
 	MarkOutboxDone(ctx context.Context, outboxID int64) error
+	HasLiveHold(ctx context.Context, showID, seatID int64, owner string) (bool, error)
 
 	// Payments (repository_payments.go).
 	BeginPayment(ctx context.Context, in ConfirmInput) (payment Payment, created bool, err error)

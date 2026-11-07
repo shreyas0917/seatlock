@@ -139,3 +139,18 @@ func TestProcessOutbox_UnknownKindIsAnError(t *testing.T) {
 	svc, _, _, _ := newTestServiceWithGateway()
 	assert.Error(t, svc.ProcessOutboxRow(context.Background(), OutboxRow{ID: 1, Kind: "NOPE", Payload: []byte(`{}`)}))
 }
+
+// A stale RELEASE_LOCK (the user already holds the seat again) must not
+// delete the user's current lock: it is skipped and marked DONE.
+func TestProcessOutbox_StaleReleaseLock_IsSkipped(t *testing.T) {
+	svc, repo, locker, _ := newTestServiceWithGateway()
+	holdFor(t, svc) // alice holds seat 1 of show 1 right now
+	releasesBefore := locker.releaseCalls
+	payload, _ := json.Marshal(releaseLockPayload{ShowID: 1, SeatID: 1, Owner: "alice"})
+
+	err := svc.ProcessOutboxRow(context.Background(), OutboxRow{ID: 9, Kind: OutboxReleaseLock, Payload: payload})
+
+	require.NoError(t, err)
+	assert.Equal(t, releasesBefore, locker.releaseCalls, "the current lock is not released")
+	assert.Equal(t, []int64{9}, repo.outboxDone, "the stale row is done")
+}

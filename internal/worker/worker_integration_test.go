@@ -589,3 +589,27 @@ func TestKeyCleanup_DeletesOnlyOldCompletedKeys(t *testing.T) {
 	assert.Equal(t, 2, e.count(`SELECT COUNT(*) FROM idempotency_keys`))
 	assert.Zero(t, e.count(`SELECT COUNT(*) FROM idempotency_keys WHERE key = 'old-done'`))
 }
+
+// Step 0 of Phase 5: a STALE RELEASE_LOCK must not delete the same user's
+// newer lock. A's hold expires (the expirer queues RELEASE_LOCK owner=A), A
+// holds the same seat again before the drainer runs, then the drainer runs
+// the stale row: A's current lock must survive.
+func TestDrainer_StaleReleaseLock_KeepsSameUsersNewLock(t *testing.T) {
+	e := setup(t, 1)
+	ctx := context.Background()
+	key := fmt.Sprintf("seat:%d:%d", e.showID, e.seatIDs[0])
+	first := e.hold("alice", 0)
+	e.exec(`UPDATE holds SET expires_at = NOW() - interval '1 second' WHERE id = $1`, first.ID)
+	e.runOnce(&worker.HoldExpirer{Store: e.repo, Logger: e.logger, BatchSize: 50})
+	require.Equal(t, 1, e.count(`SELECT COUNT(*) FROM outbox WHERE kind = 'RELEASE_LOCK' AND status = 'PENDING'`))
+
+	second := e.hold("alice", 0) // A re-holds before the drainer runs
+
+	res := e.runOnce(e.drainer(e.svc, 50))
+
+	assert.Equal(t, 1, res.Succeeded)
+	assert.Equal(t, "DONE", e.str(`SELECT status FROM outbox WHERE kind = 'RELEASE_LOCK'`), "the stale row is closed")
+	assert.Equal(t, "alice", e.rdb.Get(ctx, key).Val(), "A's current lock still exists and is owned by A")
+	assert.Equal(t, "ACTIVE", e.str(`SELECT status FROM holds WHERE id = $1`, second.ID))
+	e.assertInvariants()
+}

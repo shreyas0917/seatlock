@@ -263,6 +263,17 @@ func (f *fakeRepository) ReleaseHold(ctx context.Context, userID string, holdID 
 	return h, f.nextID, nil
 }
 
+func (f *fakeRepository) HasLiveHold(ctx context.Context, showID, seatID int64, owner string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, h := range f.holds {
+		if h.ShowID == showID && h.SeatID == seatID && h.UserID == owner && h.Status == HoldActive {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (f *fakeRepository) MarkOutboxDone(ctx context.Context, outboxID int64) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

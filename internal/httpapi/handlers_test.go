@@ -119,6 +119,10 @@ func (s *stubRepository) ReleaseHold(ctx context.Context, userID string, holdID 
 
 func (s *stubRepository) MarkOutboxDone(ctx context.Context, outboxID int64) error { return nil }
 
+func (s *stubRepository) HasLiveHold(ctx context.Context, showID, seatID int64, owner string) (bool, error) {
+	return false, nil
+}
+
 // stubLocker is a SeatLocker. acquireErr simulates Redis being down; heldBy
 // simulates another user holding the Redis lock.
 type stubLocker struct {

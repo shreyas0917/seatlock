@@ -133,6 +133,28 @@ func (s *Service) ProcessOutboxRow(ctx context.Context, row OutboxRow) error {
 		if err := json.Unmarshal(row.Payload, &p); err != nil {
 			return fmt.Errorf("bad RELEASE_LOCK payload: %w", err)
 		}
+
+		// STALE RELEASE GUARD. The Redis lock's value is the USER, not the
+		// hold. If this row is stale (written when an older hold expired or
+		// was cancelled) and the same user has since held the same seat
+		// again, the owner check alone would pass and we would delete the
+		// user's CURRENT lock. Postgres knows which hold is current, so ask
+		// it first: a live hold of the same owner means "this release is
+		// stale", so skip it and mark the row DONE.
+		//
+		// A tiny window remains: the user could re-hold between this check
+		// and the Release call below. That only costs the lock (Redis says
+		// "free" while Postgres holds the seat for the user); anyone else is
+		// still rejected by Postgres, the authority, so it is safe. A
+		// hold-scoped lock token would close it (see docs/learning/phase-5.md).
+		live, err := s.repo.HasLiveHold(ctx, p.ShowID, p.SeatID, p.Owner)
+		if err != nil {
+			return err
+		}
+		if live {
+			return s.repo.MarkOutboxDone(ctx, row.ID)
+		}
+
 		// Not the best-effort releaseLock helper: here a Redis error must
 		// come back as an error, so the row is retried later.
 		if err := s.locker.Release(ctx, p.ShowID, p.SeatID, p.Owner); err != nil {

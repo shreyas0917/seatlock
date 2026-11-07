@@ -275,6 +275,27 @@ func (r *PostgresRepository) ExpireHolds(ctx context.Context, limit int) ([]Expi
 	return out, nil
 }
 
+// HasLiveHold reports whether the seat currently has an ACTIVE hold owned by
+// owner that is not dead (deadHoldCondition: the same rule as CreateHold, the
+// seat map and the expirer). The outbox drainer asks this before releasing a
+// Redis lock, so a STALE release can never delete the owner's newer lock.
+func (r *PostgresRepository) HasLiveHold(ctx context.Context, showID, seatID int64, owner string) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, r.queryTimeout)
+	defer cancel()
+
+	var live bool
+	err := r.pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM holds h
+			WHERE h.show_id = $1 AND h.seat_id = $2 AND h.user_id = $3
+			  AND h.status = 'ACTIVE' AND NOT `+deadHoldCondition(4)+`)`,
+		showID, seatID, owner, r.limits.PendingHoldMax.Seconds()).Scan(&live)
+	if err != nil {
+		return false, dbError(err, "check live hold for seat %d", seatID)
+	}
+	return live, nil
+}
+
 // RequeueOutbox puts a FAILED dead letter back in the queue (attempts reset),
 // for a human who fixed the cause. Used by `make outbox-retry ID=<id>`.
 func (r *PostgresRepository) RequeueOutbox(ctx context.Context, outboxID int64) error {
