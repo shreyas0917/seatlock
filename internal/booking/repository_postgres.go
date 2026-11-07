@@ -234,7 +234,53 @@ func (r *PostgresRepository) GetSeat(ctx context.Context, seatID int64) (Seat, e
 	return s, nil
 }
 
-// ListSeatsWithStatus returns every seat of a show as AVAILABLE, HELD or BOOKED.
+// GetSeatInShow returns the seat seatID of show showID in ONE round trip:
+// ErrShowNotFound if the show does not exist, ErrSeatNotFound if the seat
+// does not, ErrSeatNotInShow if it belongs to another show (checked in that
+// order, the same answers as GetShow followed by GetSeat).
+//
+// Phase 6: a hold used to call GetShow and then GetSeat, two pool acquires
+// and two round trips before any real work. Under load the pool was the
+// bottleneck (all connections busy, requests queuing for one), so the two
+// lookups became one query. See docs/benchmarks/RESULTS.md.
+func (r *PostgresRepository) GetSeatInShow(ctx context.Context, showID, seatID int64) (Seat, error) {
+	ctx, cancel := context.WithTimeout(ctx, r.queryTimeout)
+	defer cancel()
+
+	// Always exactly ONE row: "one" is a single-row table, the seat is
+	// LEFT JOINed (NULLs when it does not exist), the show is an EXISTS.
+	var (
+		showExists          bool
+		id, seatShow, price *int64
+		label               *string
+	)
+	err := r.pool.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM shows WHERE id = $1),
+		       s.id, s.show_id, s.seat_label, s.price_paise
+		FROM (SELECT 1) AS one
+		LEFT JOIN seats s ON s.id = $2`, showID, seatID).
+		Scan(&showExists, &id, &seatShow, &label, &price)
+	if err != nil {
+		return Seat{}, dbError(err, "get seat %d of show %d", seatID, showID)
+	}
+	switch {
+	case !showExists:
+		return Seat{}, ErrShowNotFound
+	case id == nil:
+		return Seat{}, ErrSeatNotFound
+	case *seatShow != showID:
+		return Seat{}, ErrSeatNotInShow
+	}
+	return Seat{ID: *id, ShowID: *seatShow, Label: *label, PricePaise: *price}, nil
+}
+
+// ListSeatsWithStatus returns every seat of a show as AVAILABLE, HELD or
+// BOOKED, or ErrShowNotFound if the show does not exist.
+//
+// One round trip: the query starts FROM shows, so "no rows" means "no such
+// show", and a show without seats is one row of NULL seat columns. Phase 6:
+// this used to be GetShow + this query, i.e. two pool acquires for the most
+// frequent request (seat maps), when the pool was the bottleneck.
 //
 // The status comes from PostgreSQL ONLY, never from Redis: Postgres is the
 // authority, and Redis may have lost keys or hold stale ones.
@@ -258,11 +304,12 @@ func (r *PostgresRepository) ListSeatsWithStatus(ctx context.Context, showID int
 		           WHEN h.id IS NOT NULL THEN 'HELD'
 		           ELSE 'AVAILABLE'
 		       END AS status
-		FROM seats s
+		FROM shows sh
+		LEFT JOIN seats s    ON s.show_id = sh.id
 		LEFT JOIN bookings b ON b.show_id = s.show_id AND b.seat_id = s.id
 		LEFT JOIN holds h    ON h.show_id = s.show_id AND h.seat_id = s.id
 		                    AND h.status = 'ACTIVE' AND NOT `+deadHoldCondition(2)+`
-		WHERE s.show_id = $1
+		WHERE sh.id = $1
 		ORDER BY s.id`, showID, r.limits.PendingHoldMax.Seconds())
 	if err != nil {
 		return nil, dbError(err, "list seats for show %d", showID)
@@ -270,17 +317,30 @@ func (r *PostgresRepository) ListSeatsWithStatus(ctx context.Context, showID int
 	defer rows.Close()
 
 	seats := []SeatWithStatus{}
+	showFound := false
 	for rows.Next() {
-		var s SeatWithStatus
-		var status string
-		if err := rows.Scan(&s.ID, &s.ShowID, &s.Label, &s.PricePaise, &status); err != nil {
+		showFound = true
+		var (
+			id, seatShow, price *int64
+			label               *string
+			status              string
+		)
+		if err := rows.Scan(&id, &seatShow, &label, &price, &status); err != nil {
 			return nil, dbError(err, "scan seat")
 		}
-		s.Status = SeatStatus(status)
-		seats = append(seats, s)
+		if id == nil { // the show exists but has no seats
+			continue
+		}
+		seats = append(seats, SeatWithStatus{
+			Seat:   Seat{ID: *id, ShowID: *seatShow, Label: *label, PricePaise: *price},
+			Status: SeatStatus(status),
+		})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, dbError(err, "list seats for show %d", showID)
+	}
+	if !showFound {
+		return nil, ErrShowNotFound
 	}
 	return seats, nil
 }

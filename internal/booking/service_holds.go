@@ -39,16 +39,10 @@ func (s *Service) holdSeat(ctx context.Context, in HoldSeatInput) (Hold, bool, e
 		return Hold{}, false, err
 	}
 
-	// Clear 404 / 400 answers before touching the lock.
-	if _, err := s.repo.GetShow(ctx, in.ShowID); err != nil {
+	// Clear 404 / 400 answers before touching the lock, in ONE round trip:
+	// unknown show, unknown seat, or a seat of another show.
+	if _, err := s.repo.GetSeatInShow(ctx, in.ShowID, in.SeatID); err != nil {
 		return Hold{}, false, err
-	}
-	seat, err := s.repo.GetSeat(ctx, in.SeatID)
-	if err != nil {
-		return Hold{}, false, err
-	}
-	if seat.ShowID != in.ShowID {
-		return Hold{}, false, ErrSeatNotInShow
 	}
 
 	// 1. Fast filter: the Redis lock.

@@ -60,7 +60,24 @@ func (s *stubRepository) GetSeat(ctx context.Context, seatID int64) (booking.Sea
 	return booking.Seat{ID: 7, ShowID: 1, Label: "A7", PricePaise: 25000}, nil
 }
 
+func (s *stubRepository) GetSeatInShow(ctx context.Context, showID, seatID int64) (booking.Seat, error) {
+	if showID != 1 {
+		return booking.Seat{}, booking.ErrShowNotFound
+	}
+	seat, err := s.GetSeat(ctx, seatID)
+	if err != nil {
+		return booking.Seat{}, err
+	}
+	if seat.ShowID != showID {
+		return booking.Seat{}, booking.ErrSeatNotInShow
+	}
+	return seat, nil
+}
+
 func (s *stubRepository) ListSeatsWithStatus(ctx context.Context, showID int64) ([]booking.SeatWithStatus, error) {
+	if showID != 1 {
+		return nil, booking.ErrShowNotFound
+	}
 	return []booking.SeatWithStatus{
 		{Seat: booking.Seat{ID: 7, ShowID: 1, Label: "A7", PricePaise: 25000}, Status: booking.SeatHeld},
 	}, nil

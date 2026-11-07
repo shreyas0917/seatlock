@@ -24,6 +24,9 @@ import (
 // Error contract (implementations must follow it):
 //   - GetShow returns ErrShowNotFound, GetSeat ErrSeatNotFound,
 //     GetBooking ErrBookingNotFound when the row does not exist;
+//   - GetSeatInShow returns ErrShowNotFound, ErrSeatNotFound or
+//     ErrSeatNotInShow (in that order); ListSeatsWithStatus returns
+//     ErrShowNotFound for an unknown show;
 //   - CreateHold returns ErrSeatHeld / ErrSeatAlreadyBooked when the seat is
 //     not free, and created=false with the existing hold for a same-user retry;
 //   - BeginPayment and ReleaseHold return ErrHoldNotFound, ErrHoldAlreadyUsed
@@ -33,6 +36,7 @@ type Repository interface {
 	ListShows(ctx context.Context) ([]Show, error)
 	GetShow(ctx context.Context, showID int64) (Show, error)
 	GetSeat(ctx context.Context, seatID int64) (Seat, error)
+	GetSeatInShow(ctx context.Context, showID, seatID int64) (Seat, error)
 	ListSeatsWithStatus(ctx context.Context, showID int64) ([]SeatWithStatus, error)
 	GetBooking(ctx context.Context, bookingID int64) (Booking, error)
 	CreateHold(ctx context.Context, in HoldSeatInput, ttl time.Duration) (hold Hold, created bool, err error)
@@ -78,11 +82,8 @@ func (s *Service) ListSeats(ctx context.Context, showID int64) ([]SeatWithStatus
 	if showID <= 0 {
 		return nil, fmt.Errorf("%w: show_id must be a positive number", ErrInvalidInput)
 	}
-	// Check the show exists first, so an unknown show is a clear 404
-	// instead of an empty seat list.
-	if _, err := s.repo.GetShow(ctx, showID); err != nil {
-		return nil, err
-	}
+	// An unknown show is a clear 404 (ErrShowNotFound from the same query),
+	// not an empty seat list.
 	return s.repo.ListSeatsWithStatus(ctx, showID)
 }
 

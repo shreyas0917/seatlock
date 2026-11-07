@@ -96,9 +96,28 @@ func (f *fakeRepository) GetSeat(ctx context.Context, seatID int64) (Seat, error
 	return seat, nil
 }
 
+func (f *fakeRepository) GetSeatInShow(ctx context.Context, showID, seatID int64) (Seat, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.shows[showID]; !ok {
+		return Seat{}, ErrShowNotFound
+	}
+	seat, ok := f.seats[seatID]
+	if !ok {
+		return Seat{}, ErrSeatNotFound
+	}
+	if seat.ShowID != showID {
+		return Seat{}, ErrSeatNotInShow
+	}
+	return seat, nil
+}
+
 func (f *fakeRepository) ListSeatsWithStatus(ctx context.Context, showID int64) ([]SeatWithStatus, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if _, ok := f.shows[showID]; !ok {
+		return nil, ErrShowNotFound
+	}
 	var result []SeatWithStatus
 	for _, seat := range f.seats {
 		if seat.ShowID != showID {

@@ -207,6 +207,53 @@ func TestPostgres_NotFoundErrors(t *testing.T) {
 	assert.ErrorIs(t, err, ErrBookingNotFound)
 }
 
+// GetSeatInShow answers all three "not found" cases in one round trip, in
+// the same order (and with the same errors) as GetShow + GetSeat did.
+func TestPostgres_GetSeatInShow(t *testing.T) {
+	f := setupTestDB(t)
+	ctx := context.Background()
+
+	seat, err := f.repo.GetSeatInShow(ctx, f.showID, f.seatIDs[1])
+	require.NoError(t, err)
+	assert.Equal(t, f.seatIDs[1], seat.ID)
+	assert.Equal(t, f.showID, seat.ShowID)
+	assert.Equal(t, "A2", seat.Label)
+	assert.Equal(t, int64(25000), seat.PricePaise)
+
+	_, err = f.repo.GetSeatInShow(ctx, 999999, f.seatIDs[0])
+	assert.ErrorIs(t, err, ErrShowNotFound, "unknown show wins, like GetShow first")
+	_, err = f.repo.GetSeatInShow(ctx, 999999, 999999)
+	assert.ErrorIs(t, err, ErrShowNotFound)
+	_, err = f.repo.GetSeatInShow(ctx, f.showID, 999999)
+	assert.ErrorIs(t, err, ErrSeatNotFound)
+
+	var otherShow, otherSeat int64
+	require.NoError(t, f.pool.QueryRow(ctx, `INSERT INTO shows (title, venue, starts_at)
+		VALUES ('Other', 'Elsewhere', NOW() + interval '1 day') RETURNING id`).Scan(&otherShow))
+	require.NoError(t, f.pool.QueryRow(ctx, `INSERT INTO seats (show_id, seat_label, price_paise)
+		VALUES ($1, 'Z1', 100) RETURNING id`, otherShow).Scan(&otherSeat))
+	_, err = f.repo.GetSeatInShow(ctx, f.showID, otherSeat)
+	assert.ErrorIs(t, err, ErrSeatNotInShow)
+}
+
+// The seat map is ONE query now: an unknown show is ErrShowNotFound (404),
+// a show without seats is an empty list (not an error).
+func TestPostgres_SeatMap_UnknownShowAndShowWithoutSeats(t *testing.T) {
+	f := setupTestDB(t)
+	ctx := context.Background()
+
+	_, err := f.repo.ListSeatsWithStatus(ctx, 999999)
+	assert.ErrorIs(t, err, ErrShowNotFound)
+
+	var empty int64
+	require.NoError(t, f.pool.QueryRow(ctx, `INSERT INTO shows (title, venue, starts_at)
+		VALUES ('Empty', 'Nowhere', NOW() + interval '1 day') RETURNING id`).Scan(&empty))
+	seats, err := f.repo.ListSeatsWithStatus(ctx, empty)
+	require.NoError(t, err)
+	assert.Empty(t, seats)
+	assert.NotNil(t, seats, "an empty list, so the API answers [] and not null")
+}
+
 func TestPostgres_ListShowsAndSeatMap(t *testing.T) {
 	f := setupTestDB(t)
 	ctx := context.Background()
