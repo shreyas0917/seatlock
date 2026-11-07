@@ -1,8 +1,12 @@
-// service_test.go unit-tests the business rules in service.go.
+// service_test.go unit-tests the business rules in service.go and
+// service_holds.go.
 //
-// It uses fakeRepository, an in-memory stand-in for Postgres, so these tests
-// need no database and run in milliseconds (`make test`). The real SQL is
-// tested separately in repository_postgres_test.go (`make test-integration`).
+// It uses fakeRepository (an in-memory stand-in for Postgres) and fakeLocker
+// (an in-memory stand-in for Redis that can also pretend to be DOWN), so
+// these tests need no database or Redis and run in milliseconds (`make
+// test`). This is the payoff of the Repository and SeatLocker interfaces: the
+// service cannot tell a fake from the real thing. The real SQL and Redis are
+// tested separately (`make test-integration`).
 package booking
 
 import (
@@ -23,7 +27,13 @@ type fakeRepository struct {
 	shows    map[int64]Show
 	seats    map[int64]Seat
 	bookings map[int64]Booking
+	holds    map[int64]Hold
 	nextID   int64
+
+	// createHoldErr, if set, is returned by CreateHold (simulates Postgres rejecting).
+	createHoldErr error
+	// createHoldCalls counts CreateHold calls, to prove when it is NOT called.
+	createHoldCalls int
 }
 
 // newFakeRepository returns a fake with show 1 (seats 1 and 2) and show 2 (seat 3).
@@ -39,6 +49,7 @@ func newFakeRepository() *fakeRepository {
 			3: {ID: 3, ShowID: 2, Label: "A1", PricePaise: 25000},
 		},
 		bookings: map[int64]Booking{},
+		holds:    map[int64]Hold{},
 	}
 }
 
@@ -118,8 +129,106 @@ func (f *fakeRepository) GetBooking(ctx context.Context, bookingID int64) (Booki
 	return b, nil
 }
 
+func (f *fakeRepository) CreateHold(ctx context.Context, in HoldSeatInput, ttl time.Duration) (Hold, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.createHoldCalls++
+	if f.createHoldErr != nil {
+		return Hold{}, false, f.createHoldErr
+	}
+	for _, h := range f.holds {
+		if h.SeatID == in.SeatID && h.Status == HoldActive {
+			if h.UserID == in.UserID {
+				return h, false, nil
+			}
+			return Hold{}, false, ErrSeatHeld
+		}
+	}
+	f.nextID++
+	h := Hold{ID: f.nextID, ShowID: in.ShowID, SeatID: in.SeatID, UserID: in.UserID,
+		Status: HoldActive, ExpiresAt: time.Now().Add(ttl), SecondsLeft: int64(ttl.Seconds())}
+	f.holds[h.ID] = h
+	return h, true, nil
+}
+
+func (f *fakeRepository) ConfirmHold(ctx context.Context, in ConfirmInput) (Booking, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	h, ok := f.holds[in.HoldID]
+	if !ok || h.UserID != in.UserID {
+		return Booking{}, ErrHoldNotFound
+	}
+	switch h.Status {
+	case HoldConsumed:
+		return Booking{}, ErrHoldAlreadyUsed
+	case HoldActive:
+	default:
+		return Booking{}, ErrHoldExpired
+	}
+	f.nextID++
+	b := Booking{ID: f.nextID, ShowID: h.ShowID, SeatID: h.SeatID, UserID: h.UserID, HoldID: h.ID, CreatedAt: time.Now()}
+	f.bookings[b.ID] = b
+	h.Status = HoldConsumed
+	f.holds[h.ID] = h
+	return b, nil
+}
+
+func (f *fakeRepository) ReleaseHold(ctx context.Context, userID string, holdID int64) (Hold, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	h, ok := f.holds[holdID]
+	if !ok || h.UserID != userID {
+		return Hold{}, ErrHoldNotFound
+	}
+	if h.Status != HoldActive {
+		return Hold{}, ErrHoldExpired
+	}
+	h.Status = HoldReleased
+	f.holds[h.ID] = h
+	return h, nil
+}
+
+// fakeLocker implements SeatLocker in memory. Set acquireErr to pretend Redis
+// is down, or heldBy to pretend another user holds the lock.
+type fakeLocker struct {
+	mu           sync.Mutex
+	acquireErr   error
+	releaseErr   error
+	heldBy       string
+	acquireCalls int
+	releaseCalls int
+}
+
+func (l *fakeLocker) Acquire(ctx context.Context, showID, seatID int64, owner string) (bool, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.acquireCalls++
+	if l.acquireErr != nil {
+		return false, l.acquireErr
+	}
+	if l.heldBy != "" && l.heldBy != owner {
+		return false, nil
+	}
+	return true, nil
+}
+
+func (l *fakeLocker) Release(ctx context.Context, showID, seatID int64, owner string) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.releaseCalls++
+	return l.releaseErr
+}
+
+// newTestService wires a Service to fresh fakes and returns all three, so a
+// test can configure the fakes and inspect what was called.
+func newTestService() (*Service, *fakeRepository, *fakeLocker) {
+	repo := newFakeRepository()
+	locker := &fakeLocker{}
+	return NewService(repo, locker, 300*time.Second), repo, locker
+}
+
 func TestBookSeat_Success(t *testing.T) {
-	svc := NewService(newFakeRepository())
+	svc, _, _ := newTestService()
 
 	b, err := svc.BookSeat(context.Background(), BookSeatInput{UserID: "alice", ShowID: 1, SeatID: 1})
 
@@ -149,7 +258,7 @@ func TestBookSeat_ValidationErrors(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			svc := NewService(newFakeRepository())
+			svc, _, _ := newTestService()
 
 			_, err := svc.BookSeat(context.Background(), tc.input)
 
@@ -161,7 +270,7 @@ func TestBookSeat_ValidationErrors(t *testing.T) {
 }
 
 func TestBookSeat_SameSeatTwice(t *testing.T) {
-	svc := NewService(newFakeRepository())
+	svc, _, _ := newTestService()
 	ctx := context.Background()
 
 	_, err := svc.BookSeat(ctx, BookSeatInput{UserID: "alice", ShowID: 1, SeatID: 1})
@@ -172,7 +281,7 @@ func TestBookSeat_SameSeatTwice(t *testing.T) {
 }
 
 func TestListSeats_ShowsBookedStatus(t *testing.T) {
-	svc := NewService(newFakeRepository())
+	svc, _, _ := newTestService()
 	ctx := context.Background()
 	_, err := svc.BookSeat(ctx, BookSeatInput{UserID: "alice", ShowID: 1, SeatID: 2})
 	require.NoError(t, err)
@@ -191,7 +300,7 @@ func TestListSeats_ShowsBookedStatus(t *testing.T) {
 }
 
 func TestListSeats_UnknownShow(t *testing.T) {
-	svc := NewService(newFakeRepository())
+	svc, _, _ := newTestService()
 
 	_, err := svc.ListSeats(context.Background(), 42)
 
@@ -199,7 +308,7 @@ func TestListSeats_UnknownShow(t *testing.T) {
 }
 
 func TestGetBooking(t *testing.T) {
-	svc := NewService(newFakeRepository())
+	svc, _, _ := newTestService()
 	ctx := context.Background()
 	created, err := svc.BookSeat(ctx, BookSeatInput{UserID: "alice", ShowID: 1, SeatID: 1})
 	require.NoError(t, err)

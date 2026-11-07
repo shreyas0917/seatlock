@@ -71,7 +71,7 @@ func TestHTTP_ParallelBurstHasNo500s(t *testing.T) {
 
 	// A real HTTP server on a random local port, with the production router.
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	router := NewRouter(booking.NewService(booking.NewPostgresRepository(pool)), pool, logger)
+	router := NewRouter(booking.NewService(booking.NewPostgresRepository(pool), allowAllLocker{}, defaults.HoldTTL), pool, logger)
 	server := httptest.NewServer(router)
 	t.Cleanup(server.Close)
 

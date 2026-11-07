@@ -66,6 +66,29 @@ func (s *stubRepository) GetBooking(ctx context.Context, bookingID int64) (booki
 	return booking.Booking{}, booking.ErrBookingNotFound
 }
 
+func (s *stubRepository) CreateHold(ctx context.Context, in booking.HoldSeatInput, ttl time.Duration) (booking.Hold, bool, error) {
+	return booking.Hold{}, false, errors.New("not used yet")
+}
+
+func (s *stubRepository) ConfirmHold(ctx context.Context, in booking.ConfirmInput) (booking.Booking, error) {
+	return booking.Booking{}, errors.New("not used yet")
+}
+
+func (s *stubRepository) ReleaseHold(ctx context.Context, userID string, holdID int64) (booking.Hold, error) {
+	return booking.Hold{}, errors.New("not used yet")
+}
+
+// allowAllLocker is a SeatLocker that always grants the lock.
+type allowAllLocker struct{}
+
+func (allowAllLocker) Acquire(ctx context.Context, showID, seatID int64, owner string) (bool, error) {
+	return true, nil
+}
+
+func (allowAllLocker) Release(ctx context.Context, showID, seatID int64, owner string) error {
+	return nil
+}
+
 // stubPinger simulates the database for /readyz.
 type stubPinger struct{ err error }
 
@@ -74,7 +97,7 @@ func (p stubPinger) Ping(ctx context.Context) error { return p.err }
 // newTestRouter builds the full router with the stubs. Logs are discarded.
 func newTestRouter(repo *stubRepository, pinger Pinger) http.Handler {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	return NewRouter(booking.NewService(repo), pinger, logger)
+	return NewRouter(booking.NewService(repo, allowAllLocker{}, 300*time.Second), pinger, logger)
 }
 
 // postBooking sends POST /v1/bookings and returns the recorded response.

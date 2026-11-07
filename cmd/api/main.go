@@ -39,6 +39,7 @@ import (
 	"github.com/shreyas0917/seatlock/internal/config"
 	"github.com/shreyas0917/seatlock/internal/db"
 	"github.com/shreyas0917/seatlock/internal/httpapi"
+	"github.com/shreyas0917/seatlock/internal/lock"
 )
 
 // How long to wait for in-flight requests to finish during shutdown.
@@ -82,8 +83,20 @@ func run() error {
 	// Runs last, after the HTTP server has finished shutting down.
 	defer pool.Close()
 
+	// Redis client for the seat lock. go-redis connects lazily, so the API
+	// starts even if Redis is down: new holds then fail closed (503), while
+	// confirms and reads keep working from Postgres.
+	redisClient := lock.NewClient(lock.Options{
+		Addr:         cfg.RedisAddr,
+		DialTimeout:  cfg.RedisDialTimeout,
+		ReadTimeout:  cfg.RedisReadTimeout,
+		WriteTimeout: cfg.RedisWriteTimeout,
+	})
+	defer redisClient.Close()
+	locker := lock.NewRedisLocker(redisClient, cfg.HoldTTL, cfg.RedisLockExtra)
+
 	repo := booking.NewPostgresRepository(pool)
-	svc := booking.NewService(repo)
+	svc := booking.NewService(repo, locker, cfg.HoldTTL)
 	router := httpapi.NewRouter(svc, pool, logger)
 
 	server := &http.Server{

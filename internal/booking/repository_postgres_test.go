@@ -193,7 +193,7 @@ func TestPostgres_ListShowsAndSeatMap(t *testing.T) {
 //     i.e. until every goroutine has finished.
 func TestConcurrentBookingSameSeat(t *testing.T) {
 	f := setupTestDB(t)
-	svc := NewService(f.repo)
+	svc := NewService(f.repo, &fakeLocker{}, testHoldTTL)
 	ctx := context.Background()
 
 	const attempts = 50

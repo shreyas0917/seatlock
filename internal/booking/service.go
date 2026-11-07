@@ -1,4 +1,5 @@
 // service.go holds the business rules for shows, seats and bookings.
+// The hold -> confirm flow lives in service_holds.go.
 //
 // Where it fits: HTTP handlers (internal/httpapi) call the Service; the
 // Service validates input, applies the rules and calls the Repository for
@@ -10,6 +11,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // Repository is everything the Service needs from storage.
@@ -23,7 +25,11 @@ import (
 // Error contract (implementations must follow it):
 //   - GetShow returns ErrShowNotFound, GetSeat ErrSeatNotFound,
 //     GetBooking ErrBookingNotFound when the row does not exist;
-//   - CreateBooking returns ErrSeatAlreadyBooked when the seat is taken.
+//   - CreateBooking returns ErrSeatAlreadyBooked when the seat is taken;
+//   - CreateHold returns ErrSeatHeld / ErrSeatAlreadyBooked when the seat is
+//     not free, and created=false with the existing hold for a same-user retry;
+//   - ConfirmHold and ReleaseHold return ErrHoldNotFound, ErrHoldAlreadyUsed
+//     or ErrHoldExpired when the hold cannot be used.
 type Repository interface {
 	ListShows(ctx context.Context) ([]Show, error)
 	GetShow(ctx context.Context, showID int64) (Show, error)
@@ -31,16 +37,22 @@ type Repository interface {
 	ListSeatsWithStatus(ctx context.Context, showID int64) ([]SeatWithStatus, error)
 	CreateBooking(ctx context.Context, in BookSeatInput) (Booking, error)
 	GetBooking(ctx context.Context, bookingID int64) (Booking, error)
+	CreateHold(ctx context.Context, in HoldSeatInput, ttl time.Duration) (hold Hold, created bool, err error)
+	ConfirmHold(ctx context.Context, in ConfirmInput) (Booking, error)
+	ReleaseHold(ctx context.Context, userID string, holdID int64) (Hold, error)
 }
 
 // Service applies SeatLock's business rules.
 type Service struct {
-	repo Repository
+	repo    Repository
+	locker  SeatLocker
+	holdTTL time.Duration
 }
 
-// NewService builds a Service that stores data through repo.
-func NewService(repo Repository) *Service {
-	return &Service{repo: repo}
+// NewService builds a Service that stores data through repo, locks seats
+// through locker (Redis in production) and creates holds lasting holdTTL.
+func NewService(repo Repository, locker SeatLocker, holdTTL time.Duration) *Service {
+	return &Service{repo: repo, locker: locker, holdTTL: holdTTL}
 }
 
 // ListShows returns every show.
