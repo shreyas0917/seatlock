@@ -28,6 +28,9 @@ k6() {
   local kv
   for kv in $K6_ENV; do args+=(-e "$kv"); done
   [ -n "$summary" ] && args+=(--summary-export "/out/$(basename "$summary")")
+  # The k6 image runs as an unprivileged user; on Linux (CI) it may not
+  # write into a directory owned by the runner's user otherwise.
+  chmod a+rwx "$OUT_DIR"
   docker rm -f "$name" > /dev/null 2>&1
   docker run --rm --name "$name" --network "$NETWORK" \
     -v "$HOST_DIR/loadtest:/scripts:ro" -v "$HOST_DIR/$OUT_DIR:/out" \
