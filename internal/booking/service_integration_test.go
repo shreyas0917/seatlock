@@ -43,6 +43,15 @@ const (
 	lockExtra = 10 * time.Second
 )
 
+// Generous timeouts for integration tests. These tests check CORRECTNESS
+// (one winner, no double booking), not speed. On a busy machine the
+// production timeouts (3s DB, 200ms Redis) turned a slow-but-correct run into
+// a failure. Latency is measured separately, by load tests (Phase 6).
+const (
+	testDBQueryTimeout = 15 * time.Second
+	testRedisTimeout   = 2 * time.Second
+)
+
 // env is everything one test needs.
 type env struct {
 	pool    *pgxpool.Pool
@@ -92,14 +101,14 @@ func setup(t *testing.T) env {
 	}
 	rdb := lock.NewClient(lock.Options{
 		Addr: redisAddr, DB: 1,
-		DialTimeout: defaults.RedisDialTimeout, ReadTimeout: defaults.RedisReadTimeout, WriteTimeout: defaults.RedisWriteTimeout,
+		DialTimeout: testRedisTimeout, ReadTimeout: testRedisTimeout, WriteTimeout: testRedisTimeout,
 		PoolSize: int(defaults.RedisPoolSize), MinIdleConns: int(defaults.RedisMinIdleConns),
 	})
 	t.Cleanup(func() { _ = rdb.Close() })
 	require.NoError(t, rdb.FlushDB(ctx).Err(), "is redis running? try `make up`")
 	waitForIdleConns(t, rdb, int(defaults.RedisMinIdleConns))
 
-	repo := booking.NewPostgresRepository(pool)
+	repo := booking.NewPostgresRepository(pool, testDBQueryTimeout)
 	svc := booking.NewService(repo, lock.NewRedisLocker(rdb, holdTTL, lockExtra), holdTTL)
 	return env{pool: pool, redis: rdb, repo: repo, svc: svc, showID: showID, seatIDs: seatIDs}
 }

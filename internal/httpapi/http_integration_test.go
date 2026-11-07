@@ -39,6 +39,15 @@ import (
 
 const defaultTestDatabaseURL = "postgres://seatlock:seatlock@localhost:5434/seatlock_test?sslmode=disable"
 
+// Generous timeouts for integration tests. These tests check CORRECTNESS
+// (one winner, no double booking), not speed. On a busy machine the
+// production timeouts (3s DB, 200ms Redis) turned a slow-but-correct run into
+// a failure. Latency is measured separately, by load tests (Phase 6).
+const (
+	testDBQueryTimeout = 15 * time.Second
+	testRedisTimeout   = 2 * time.Second
+)
+
 // httpResult is what one parallel request saw.
 type httpResult struct {
 	status int
@@ -69,7 +78,7 @@ func TestHTTP_ParallelHoldBurstHasNo500s(t *testing.T) {
 	}
 	rdb := lock.NewClient(lock.Options{
 		Addr: redisAddr, DB: 1,
-		DialTimeout: defaults.RedisDialTimeout, ReadTimeout: defaults.RedisReadTimeout, WriteTimeout: defaults.RedisWriteTimeout,
+		DialTimeout: testRedisTimeout, ReadTimeout: testRedisTimeout, WriteTimeout: testRedisTimeout,
 		PoolSize: int(defaults.RedisPoolSize), MinIdleConns: int(defaults.RedisMinIdleConns),
 	})
 	t.Cleanup(func() { _ = rdb.Close() })
@@ -95,7 +104,7 @@ func TestHTTP_ParallelHoldBurstHasNo500s(t *testing.T) {
 
 	// A real HTTP server on a random local port, with the production router.
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	svc := booking.NewService(booking.NewPostgresRepository(pool), locker, defaults.HoldTTL)
+	svc := booking.NewService(booking.NewPostgresRepository(pool, testDBQueryTimeout), locker, defaults.HoldTTL)
 	server := httptest.NewServer(NewRouter(svc, pool, locker, logger))
 	t.Cleanup(server.Close)
 

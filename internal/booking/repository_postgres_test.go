@@ -31,6 +31,12 @@ import (
 
 const defaultTestDatabaseURL = "postgres://seatlock:seatlock@localhost:5434/seatlock_test?sslmode=disable"
 
+// Generous timeouts for integration tests. These tests check CORRECTNESS
+// (one winner, no double booking), not speed. On a busy machine the
+// production timeouts (3s DB, 200ms Redis) turned a slow-but-correct run into
+// a failure. Latency is measured separately, by load tests (Phase 6).
+const testDBQueryTimeout = 15 * time.Second
+
 // testFixture is what every integration test starts with: a clean database
 // containing one show with three seats.
 type testFixture struct {
@@ -85,7 +91,7 @@ func setupTestDB(t *testing.T) testFixture {
 		seatIDs = append(seatIDs, id)
 	}
 
-	return testFixture{pool: pool, repo: NewPostgresRepository(pool), showID: showID, seatIDs: seatIDs}
+	return testFixture{pool: pool, repo: NewPostgresRepository(pool, testDBQueryTimeout), showID: showID, seatIDs: seatIDs}
 }
 
 // bookSeat books a seat the only way that exists now: hold, then confirm.

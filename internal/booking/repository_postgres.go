@@ -37,11 +37,6 @@ const (
 	constraintHoldsOneActivePerSeat  = "holds_one_active_per_seat"
 )
 
-// defaultQueryTimeout caps how long any single query may take. If Postgres is
-// stuck (locks, overload), we give up and return an error instead of letting
-// requests pile up forever.
-const defaultQueryTimeout = 3 * time.Second
-
 // dbError is the ONE place repository errors get wrapped. Every method sends
 // unexpected errors through it, so timeout handling cannot be forgotten in one
 // of them.
@@ -75,8 +70,12 @@ type PostgresRepository struct {
 var _ Repository = (*PostgresRepository)(nil)
 
 // NewPostgresRepository returns a repository that runs queries on pool.
-func NewPostgresRepository(pool *pgxpool.Pool) *PostgresRepository {
-	return &PostgresRepository{pool: pool, queryTimeout: defaultQueryTimeout}
+//
+// queryTimeout (DB_QUERY_TIMEOUT, default 3s) caps how long one query or
+// transaction may take. If Postgres is stuck (locks, overload), we give up
+// with ErrBusy instead of letting requests pile up forever.
+func NewPostgresRepository(pool *pgxpool.Pool, queryTimeout time.Duration) *PostgresRepository {
+	return &PostgresRepository{pool: pool, queryTimeout: queryTimeout}
 }
 
 // ListShows returns all shows, earliest first.

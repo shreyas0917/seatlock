@@ -34,6 +34,9 @@ type Config struct {
 	// DBMinConns connections are kept open even when idle, so the first
 	// requests after a quiet period do not all pay the connection handshake.
 	DBMinConns int32
+	// DBQueryTimeout caps one database call (or one transaction), INCLUDING
+	// the time spent waiting for a free pool connection.
+	DBQueryTimeout time.Duration
 
 	// RedisAddr is host:port of Redis, used for the fast seat lock.
 	RedisAddr string
@@ -108,6 +111,7 @@ func Load() (Config, error) {
 		fallback time.Duration
 		dst      *time.Duration
 	}{
+		{"DB_QUERY_TIMEOUT", 3 * time.Second, &cfg.DBQueryTimeout},
 		{"REDIS_DIAL_TIMEOUT", 200 * time.Millisecond, &cfg.RedisDialTimeout},
 		{"REDIS_READ_TIMEOUT", 200 * time.Millisecond, &cfg.RedisReadTimeout},
 		{"REDIS_WRITE_TIMEOUT", 200 * time.Millisecond, &cfg.RedisWriteTimeout},

@@ -97,7 +97,7 @@ func run() error {
 	defer redisClient.Close()
 	locker := lock.NewRedisLocker(redisClient, cfg.HoldTTL, cfg.RedisLockExtra)
 
-	repo := booking.NewPostgresRepository(pool)
+	repo := booking.NewPostgresRepository(pool, cfg.DBQueryTimeout)
 	svc := booking.NewService(repo, locker, cfg.HoldTTL)
 	router := httpapi.NewRouter(svc, pool, locker, logger)
 

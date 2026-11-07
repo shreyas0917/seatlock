@@ -30,7 +30,8 @@ func setupRedis(t *testing.T) (*RedisLocker, *redis.Client) {
 	}
 	client := NewClient(Options{
 		Addr: addr, DB: 1,
-		DialTimeout: time.Second, ReadTimeout: time.Second, WriteTimeout: time.Second,
+		// Generous timeouts: these tests check lock correctness, not latency.
+		DialTimeout: 2 * time.Second, ReadTimeout: 2 * time.Second, WriteTimeout: 2 * time.Second,
 	})
 	t.Cleanup(func() { _ = client.Close() })
 	require.NoError(t, client.FlushDB(context.Background()).Err(), "is redis running? try `make up`")
