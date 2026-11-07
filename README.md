@@ -11,10 +11,11 @@ SeatLock is a backend-only system design project (think BookMyShow). It follows 
 - **Redis** = a fast, temporary seat lock. An optimisation, never the source of truth.
 - **PostgreSQL** = the authority for holds, hold expiry, payments, **idempotency keys**, the outbox and bookings. Redis can never override a failed PostgreSQL check, every expiry decision uses the database clock (`NOW()`), and **nothing in the confirm/payment path depends on Redis**.
 - **A background worker** repairs everything the request path leaves behind, using **the same code** as the API.
+- **Every correctness rule is a live metric**: the `verify.sql` invariants run every 15s and fire an alert the moment one breaks, on a provisioned Grafana dashboard.
 
 ## Tech stack
 
-Go · chi · PostgreSQL 16 (pgx, hand-written SQL) · Redis 7 (go-redis) · golang-migrate · slog · Swagger (swag) · Docker Compose · GitHub Actions
+Go · chi · PostgreSQL 16 (pgx, hand-written SQL) · Redis 7 (go-redis) · golang-migrate · slog · Prometheus · Grafana · Swagger (swag) · Docker Compose · GitHub Actions
 
 ## Quick start
 
@@ -22,13 +23,13 @@ Requirements: Go 1.22+, Docker, make, bash (Git Bash on Windows).
 
 ```bash
 cp .env.example .env    # local settings (Postgres on host port 5434, mock gateway on 8095)
-make up                 # build + start postgres, redis, the mock gateway, the api and the worker
+make up                 # build + start postgres, redis, the mock gateway, the api, the worker, prometheus and grafana
 make migrate-up         # create tables (the api and worker also do this on startup)
 make seed               # 1 show, 100 seats (safe to run twice)
 make run                # optional: run the api from source instead of Docker (stop the api container first)
 ```
 
-API: http://localhost:8080 · Swagger UI: http://localhost:8080/swagger/index.html · Mock gateway: http://localhost:8095
+API: http://localhost:8080 · Swagger UI: http://localhost:8080/swagger/index.html · **Grafana: http://localhost:3001** (no login) · Prometheus: http://localhost:9095 · Mock gateway: http://localhost:8095
 
 Booking is two steps: **hold** a seat (5 minutes), then **confirm** it, which **pays** and books.
 
@@ -50,7 +51,11 @@ worker (cmd/worker, N replicas, no leader) ── claims rows with FOR UPDATE SK
                   ├─ payment reconciler  : abandoned PENDING payments -> booked / refunded / declined / abandoned
                   ├─ outbox drainer      : REFUND + RELEASE_LOCK rows -> DONE (backoff, dead letters)
                   ├─ hold expirer        : dead ACTIVE holds -> EXPIRED + RELEASE_LOCK row
+                  ├─ invariants          : every verify.sql check as a live gauge, every 15s
                   └─ key cleanup         : COMPLETED idempotency keys older than 24h -> deleted
+
+prometheus ── scrapes api:9091, worker:9092, payment (internal ports only) every 5s, evaluates alerts.yml
+grafana    ── "SeatLock — Reliability" dashboard, provisioned from monitoring/grafana (no clicks)
 ```
 
 ![SeatLock architecture](docs/architecture.png)
@@ -122,19 +127,55 @@ Full explanations: [phase-1.md](docs/learning/phase-1.md) · [phase-2.md](docs/l
 
 ## The background worker
 
-`cmd/worker` runs four jobs, each on its own jittered ticker, each claiming one batch (`WORKER_BATCH_SIZE`, default 50) per run:
+`cmd/worker` runs five jobs, each on its own jittered ticker, each claiming one batch (`WORKER_BATCH_SIZE`, default 50) per run:
 
 | Job | Every | Repairs | Without it |
 |---|---|---|---|
 | **Payment reconciler** | 30s | `PENDING` payments older than `RECONCILE_AFTER` (2m): asks the gateway, then books (same `CompletePayment` as confirm), queues a refund, declines, or **voids the key and abandons** | A 504 nobody retried stays `PENDING` forever: maybe paid, no seat, no refund |
 | **Outbox drainer** | 5s | `REFUND` and `RELEASE_LOCK` rows: idempotent refund / owner-checked Redis release; backoff `min(2^n, 300)s` + jitter; `FAILED` after `OUTBOX_MAX_ATTEMPTS` (20) | A failed refund is never paid; locks linger until their TTL |
 | **Hold expirer** | 10s | `ACTIVE` holds past expiry → `EXPIRED` + `RELEASE_LOCK` (one transaction). Skips holds with a `PENDING` payment until `PENDING_HOLD_MAX` (10m) | Expired holds stay `ACTIVE` until someone else tries the seat |
+| **Invariants** | 15s | Runs every `verify.sql` check under a statement timeout and exports `seatlock_invariant_violations{check}` + outbox/payment/hold gauges | A double booking is noticed only if someone runs SQL by hand |
 | **Key cleanup** | 1h | `COMPLETED` idempotency keys older than `IDEMPOTENCY_RETENTION` (24h) | The table grows forever |
 
 - **Run as many replicas as you like**, no leader election: `docker compose up -d --scale worker=2`. Rows are claimed with `FOR UPDATE SKIP LOCKED` plus a lease.
 - **Crash-safe**: a killed worker's claims expire and are picked up again; every side effect is idempotent.
 - **Refuses to start with unsafe timings** (e.g. `RECONCILE_AFTER` must be > `PAYMENT_TIMEOUT + IDEMPOTENCY_LEASE`).
 - **Dead letters**: `make outbox-retry ID=<id>` re-queues one after you fixed its cause.
+
+## Observability
+
+`make up` starts **Prometheus** and **Grafana** with everything provisioned from the repo. Open **http://localhost:3001**: the **"SeatLock — Reliability"** dashboard is the home page, no login and no clicks needed. Run `./demo/observability.sh` to fill it with traffic.
+
+| Row | What it shows |
+|---|---|
+| **1 · Correctness** (top, large) | Double bookings and **every `verify.sql` invariant as a live gauge** (green at 0, red otherwise), outbox dead letters, oldest `PENDING` payment, invariant check errors and freshness |
+| **2 · Traffic and latency** | Requests/s by route pattern and status; p50/p95/p99 for holds and bookings |
+| **3 · Booking outcomes** | Holds by outcome (incl. `lock_unavailable` = fail-closed), confirms by outcome, idempotency results |
+| **4 · Dependencies** | Redis lock ops (`error` = fail-closed), Redis and DB pools, DB acquire wait, gateway results and p95 |
+| **5 · Worker** | Job runs and duration, rows by outcome, seconds since last success, outbox backlog, money taken vs refunds at the gateway |
+| **6 · Alerts** | Alerts firing right now |
+
+**Alerts** ([monitoring/alerts.yml](monitoring/alerts.yml), unit-tested with `promtool test rules`):
+
+| Alert | Fires when | Severity |
+|---|---|---|
+| `DoubleBookingDetected` | any `seatlock_invariant_violations{check}` > 0 (all 11 checks) | critical |
+| `InvariantChecksNotRunning` | no successful invariant check for > 2 min (or none reported) | critical |
+| `PaymentsStuckPending` | oldest `PENDING` payment > 15 min | critical |
+| `RedisLockUnavailable` | holds refused with `lock_unavailable` for 1 min (the fail-closed signal) | critical |
+| `OutboxDeadLetters` | any outbox row `FAILED` | warning |
+| `WorkerJobStalled` | a job's last success is older than 5× its interval | warning |
+| `HighErrorRate` | 5xx > 1% of requests over 5 min | warning |
+| `SlowHolds` | p95 of `POST /v1/holds` > 250 ms over 5 min | warning |
+| `DBPoolSaturated` | DB connection-acquire wait > 0.1 s/s over 5 min | warning |
+
+How it is built:
+- **One metrics package** ([internal/metrics](internal/metrics/metrics.go)): every metric documented with its labels and the panel/alert that uses it.
+- **Low cardinality**: no user, seat, hold or key ids in labels; HTTP `route` is the chi pattern (`/v1/holds/{holdID}`), never the raw path; unknown methods become `OTHER`. No label is called `job` or `instance` (worker jobs use `worker_job`). A test enforces it.
+- **`/metrics` only on internal ports** (api `:9091`, worker `:9092`), not published to the host; the public API answers `/metrics` with 404.
+- **Invariants never show a false green**: a check that fails or times out keeps its last value and counts an error.
+
+Screenshots: see [docs/images/README.md](docs/images/README.md) for the exact URLs and steps.
 
 ## Tests
 
@@ -144,7 +185,7 @@ make test-integration   # + real Postgres, Redis and the in-process mock gateway
 make verify             # gofmt + vet + unit + integration tests; full log in tmp/. Push only if this passes.
 ```
 
-CI (GitHub Actions) runs the same `scripts/verify.sh` **with `-race`** against Postgres 16 and Redis 7 service containers, with the normal (not demo) timings.
+CI (GitHub Actions) runs the same `scripts/verify.sh` **with `-race`** against Postgres 16 and Redis 7 service containers, with the normal (not demo) timings. `verify.sh` also runs `promtool check config`, `check rules` and `test rules` on the monitoring config (skipped locally without Docker, always run in CI), and a Go test validates the dashboard JSON.
 
 Key proofs (integration):
 
@@ -161,6 +202,10 @@ Key proofs (integration):
 | `TestDrainer_BackoffThenSuccess` / `TestDrainer_DeadLetter` | refunds retry with growing delays; after N attempts → `FAILED`, not retried |
 | `TestPendingHoldMax_SeatFreesThenLateSuccessIsRefunded` | gateway down for long → seat frees after `PENDING_HOLD_MAX`; late success → **refund, no booking** |
 | `TestTwoWorkers_ProcessEveryRowExactlyOnce` | 2 workers, 30-row backlog → **every row processed exactly once**, 30 refunds |
+| `TestInvariants_DeliberateViolationIsReported` | a booking nobody paid for → its invariant gauge becomes 1 (the alert can fire) |
+| `TestInvariants_FailingCheckKeepsLastValueAndCountsError` | a timed-out check keeps its last value and counts an error: never a false 0 |
+| `TestMetrics_RouteLabelIsThePattern` | `/v1/holds/123` is recorded as `/v1/holds/{holdID}`: no ids in labels |
+| `alerts_test.yml` (promtool) | `DoubleBookingDetected`, `WorkerJobStalled` (stalled vs healthy) and `OutboxDeadLetters` fire exactly when they should |
 
 Every worker test also runs the [verify.sql](demo/verify.sql) invariants. Integration tests use the `seatlock_test` database and Redis database 1, so they never touch your demo data. **Always run them through `make test-integration` / `make verify`** (`-p 1`; packages share the test database).
 
@@ -181,9 +226,12 @@ make reset-data                      # free all seats (keeps shows/seats; clears
 ./demo/worker-reconcile.sh           # 504 and the user never retries -> worker books it, 1 charge
 ./demo/outbox-retry.sh               # refund fails twice -> worker retries with backoff -> REFUNDED, 1 refund
 ./demo/worker-crash.sh               # worker SIGKILLed mid-backlog, restarted -> all 12 completed exactly once
+
+# observability (with `make up`)
+./demo/observability.sh              # targets up, traffic + Redis stop, then asserts what Prometheus saw
 ```
 
-`make up-demo` uses [docker-compose.demo.yml](docker-compose.demo.yml) (20s holds, reconcile after 15s, fast intervals); `make up` switches back. Every demo prints PASS/FAIL per step and the gateway's stats, exits non-zero on any failure, and ends with [demo/verify.sql](demo/verify.sql): **11 invariant checks** that must all return 0 rows (no double booking, every booking backed by exactly one `SUCCEEDED` payment, no money taken without a seat or a refund, no `PENDING` payment or `REFUND_PENDING` older than 15 minutes, no forgotten expired hold, …).
+`make up-demo` uses [docker-compose.demo.yml](docker-compose.demo.yml) (20s holds, reconcile after 15s, fast intervals); `make up` switches back. Every demo prints PASS/FAIL per step and the gateway's stats, exits non-zero on any failure, and ends with [demo/verify.sql](demo/verify.sql): **11 invariant checks** (generated from [internal/invariants/checks.go](internal/invariants/checks.go), the same checks the worker exports as live gauges) that must all return 0 rows (no double booking, every booking backed by exactly one `SUCCEEDED` payment, no money taken without a seat or a refund, no `PENDING` payment or `REFUND_PENDING` older than 15 minutes, no forgotten expired hold, …).
 
 ## Configuration
 
@@ -210,16 +258,20 @@ make reset-data                      # free all seats (keeps shows/seats; clears
 | `OUTBOX_INTERVAL` / `OUTBOX_LEASE` | `5s` / `60s` | Outbox drainer |
 | `EXPIRE_INTERVAL` | `10s` | Hold expirer |
 | `CLEANUP_INTERVAL` / `IDEMPOTENCY_RETENTION` | `1h` / `24h` | Idempotency key cleanup |
+| `INVARIANTS_INTERVAL` / `INVARIANT_STATEMENT_TIMEOUT` | `15s` / `2s` | Invariant checks as live gauges, and the max time per check query |
+| `METRICS_ADDR` | api `:9091`, worker `:9092` | Internal `/metrics` port (never the public API port) |
+| `PROMETHEUS_PORT` / `GRAFANA_PORT` / `GRAFANA_ADMIN_PASSWORD` | `9095` / `3001` / `admin` | Observability (Grafana viewing needs no login) |
 | `PAYMENT_PORT` / `PAYMENT_FAIL_RATE` / `PAYMENT_MIN_DELAY` / `PAYMENT_MAX_DELAY` / `PAYMENT_SLOW_DELAY` | `8095` / `0` / `0s` / `0s` / `3s` | Mock gateway (demos) |
 
 ## Known limitations (to be addressed in later phases)
 
-- **No metrics yet (Phase 5).** The worker logs one structured line per action (job, row id, outcome, attempt, duration), and each `RunOnce` returns claimed/succeeded/failed counts ready to become metrics.
+- **Alerts are not delivered anywhere yet.** They show in Prometheus and on the dashboard; wiring Alertmanager to Slack/PagerDuty is out of scope.
+- **The Redis lock's value is the user, not the hold.** The drainer checks Postgres before releasing a lock (so a stale release never deletes the same user's newer lock), but a tiny window remains between that check and the release. Postgres stays the authority; a hold-scoped lock token would close it.
 - **Hold hoarding.** A user can re-hold the same seat right after their hold expires, indefinitely. A later phase will add a per-user cooldown or limit.
 - **10-second Redis/DB window.** For up to 10s after a hold expires, a new hold by another user can still get `409 SEAT_HELD` from Redis (Redis lock 310s vs DB hold 300s, on purpose). The worker usually closes this sooner by releasing the lock right after expiry.
 - **A seat whose payment is in flight stays blocked** for up to `PENDING_HOLD_MAX` (10m) past its expiry if the gateway is unreachable. That is the price of not handing a possibly-paid seat to someone else; a late successful charge is then refunded.
 - **A confirm with a new key after the booking exists** answers `409 HOLD_ALREADY_USED`.
-- **Dead letters need a human** (`make outbox-retry ID=<id>`); there is no alerting yet (Phase 5).
+- **Dead letters need a human** (`make outbox-retry ID=<id>`); `OutboxDeadLetters` flags them.
 
 ## Project layout
 
@@ -232,7 +284,9 @@ internal/config/      environment variables + the worker's safety checks
 internal/db/          pgx pool + migration runner
 internal/booking/     domain: models, errors, services (holds, payments, worker actions),
                       repositories (SQL, incl. SKIP LOCKED claims), SeatLocker and PaymentGateway interfaces
-internal/worker/      job runner (tickers, jitter, shutdown) and the four jobs
+internal/worker/      job runner (tickers, jitter, shutdown, metrics) and the five jobs
+internal/metrics/     every Prometheus metric, in one place; pool collectors
+internal/invariants/  the invariant checks (single source of demo/verify.sql and the live gauges)
 internal/lock/        Redis SeatLocker (SET NX EX, Lua release)
 internal/payment/     HTTP PaymentGateway client (charge, refund, lookup, void)
 internal/paymentmock/ the mock gateway (idempotent charges/refunds, void, forced behaviours)
@@ -244,11 +298,12 @@ docs/                 Swagger output, architecture diagram, learning notes
 demo/                 demo scripts + verify.sql
 scripts/verify.sh     the push gate (also run by CI)
 docker-compose.demo.yml  short timings for the worker demos (`make up-demo`)
+monitoring/           prometheus.yml, alerts.yml (+ promtool tests), Grafana provisioning and dashboard
 ```
 
 ## Make targets
 
-`up` · `up-demo` · `down` · `logs` · `run` · `test` · `test-integration` · `verify` · `migrate-up` · `migrate-down` · `seed` · `reset-data` · `outbox-retry` · `swagger` · `lint`
+`up` · `up-demo` · `down` · `logs` · `run` · `test` · `test-integration` · `verify` · `verify-sql` · `migrate-up` · `migrate-down` · `seed` · `reset-data` · `outbox-retry` · `swagger` · `lint`
 
 `make swagger` needs the swag CLI once: `go install github.com/swaggo/swag/cmd/swag@v1.16.4`
 
@@ -259,7 +314,7 @@ docker-compose.demo.yml  short timings for the worker demos (`make up-demo`)
 - [x] Phase 2: Redis seat holds (`SET NX EX 310`), PostgreSQL as authority for holds, fail-closed
 - [x] Phase 3: Payments (mock gateway), idempotency keys in PostgreSQL, refund on expiry, outbox, CI
 - [x] Phase 4: Background worker: reconcile abandoned payments (with void), drain the outbox (backoff, dead letters), expire holds, clean up keys
-- [ ] Phase 5: Prometheus + Grafana
+- [x] Phase 5: Observability: Prometheus metrics (RED, domain, pools, worker), invariants as live gauges, 9 alerts, provisioned Grafana dashboard
 - [ ] Phase 6: k6 load tests
 - [ ] Phase 7: Chaos scripts, full CI
 - [ ] Phase 8: To be defined
