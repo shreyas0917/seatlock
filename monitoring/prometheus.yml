@@ -6,7 +6,9 @@
 #
 # dns_sd_configs (type A) resolves the Compose service name to ALL its
 # containers, so `docker compose up --scale worker=2` is scraped without
-# config changes; each replica becomes its own "instance".
+# config changes; each replica becomes its own "instance". The api job
+# resolves the alias "api-replicas", shared by api and (profile "scale")
+# api-2, so both replicas are job="api" and the dashboard sums them.
 
 global:
   scrape_interval: 5s
@@ -18,7 +20,7 @@ rule_files:
 scrape_configs:
   - job_name: api
     dns_sd_configs:
-      - names: [api]
+      - names: [api-replicas]
         type: A
         port: 9091
         refresh_interval: 15s

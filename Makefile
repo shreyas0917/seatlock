@@ -10,7 +10,7 @@ SWAG_VERSION  := v1.16.4
 # Extra flags for go test, e.g. `make test TEST_FLAGS=-race` (CI does this on Linux).
 TEST_FLAGS    ?=
 
-.PHONY: up up-demo up-bench seed-load down logs run test test-integration verify verify-sql migrate-up migrate-down seed reset-data outbox-retry swagger lint
+.PHONY: up up-demo up-bench up-scale seed-load down logs run test test-integration verify verify-sql migrate-up migrate-down seed reset-data outbox-retry swagger lint
 
 ## up: build the API image and start postgres, redis and api in the background
 up:
@@ -27,9 +27,15 @@ up-demo:
 up-bench:
 	docker compose -f docker-compose.yml -f docker-compose.bench.yml up -d --build --wait
 
+## up-scale: like up-bench, plus the "scale" profile: a second api replica
+##           (api-2) behind an nginx load balancer at http://localhost:8088
+##           (http://lb inside the network). Used by chaos/api-replica.sh.
+up-scale:
+	docker compose -f docker-compose.yml -f docker-compose.bench.yml --profile scale up -d --build --wait
+
 ## down: stop all containers (data volume is kept; use `docker compose down -v` to wipe it)
 down:
-	docker compose down
+	docker compose --profile scale down
 
 ## logs: follow logs from all containers
 logs:

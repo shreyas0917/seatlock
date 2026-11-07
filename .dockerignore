@@ -1,0 +1,16 @@
+# Keep the Docker build context to what `go build ./cmd/...` needs, so that
+# editing tests, scripts, results or docs never forces a Go rebuild.
+.git
+.github
+tmp
+loadtest
+chaos
+demo
+deploy
+monitoring
+docs/benchmarks
+docs/images
+docs/learning
+docs/*.png
+*.md
+.env
