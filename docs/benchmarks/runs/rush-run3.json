@@ -1,0 +1,715 @@
+{
+    "metrics": {
+        "responses{endpoint:confirm,status:422}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "http_req_duration{endpoint:seats}": {
+            "max": 0,
+            "p(90)": 0,
+            "p(95)": 0,
+            "p(99)": 0,
+            "count": 0,
+            "avg": 0,
+            "min": 0,
+            "med": 0,
+            "thresholds": {
+                "max>=0": false
+            }
+        },
+        "responses{endpoint:cancel,status:409}": {
+            "rate": 0,
+            "count": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:cancel,status:500}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "http_req_waiting": {
+            "p(99)": 164.6930671399997,
+            "count": 5103,
+            "avg": 8.573536236723516,
+            "min": 1.094474,
+            "med": 3.404384,
+            "max": 306.364013,
+            "p(90)": 9.379075799999999,
+            "p(95)": 19.6961686
+        },
+        "responses{endpoint:confirm,status:201}": {
+            "rate": 9.972834445752753,
+            "count": 100,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:cancel,status:200}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "http_req_sending": {
+            "count": 5103,
+            "avg": 0.09433290672153634,
+            "min": 0.012111,
+            "med": 0.057698,
+            "max": 12.831879,
+            "p(90)": 0.10159960000000001,
+            "p(95)": 0.14635759999999923,
+            "p(99)": 0.7304636999999872
+        },
+        "http_req_connecting": {
+            "p(90)": 0.24835160000000003,
+            "p(95)": 0.3444154999999995,
+            "p(99)": 2.3277994199999954,
+            "count": 5103,
+            "avg": 0.12547246698020773,
+            "min": 0,
+            "med": 0,
+            "max": 20.00225
+        },
+        "responses{endpoint:seats,status:422}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:hold,status:422}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:hold,status:410}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "http_req_duration{endpoint:hold}": {
+            "p(95)": 15.022441,
+            "p(99)": 44.73322,
+            "count": 5001,
+            "avg": 5.536631558288336,
+            "min": 1.257552,
+            "med": 3.572899,
+            "max": 101.483114,
+            "p(90)": 8.316809,
+            "thresholds": {
+                "max>=0": false
+            }
+        },
+        "responses{endpoint:confirm,status:500}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "http_req_duration{expected_response:true}": {
+            "max": 306.449135,
+            "p(90)": 9.713919400000012,
+            "p(95)": 20.623179999999966,
+            "p(99)": 164.7874382399997,
+            "count": 5103,
+            "avg": 8.812398385263553,
+            "min": 1.257552,
+            "med": 3.597771
+        },
+        "responses{endpoint:hold,status:201}": {
+            "count": 100,
+            "rate": 9.972834445752753,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:seats,status:503}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:seats,status:504}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:seats,status:0}": {
+            "rate": 0,
+            "count": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:hold,status:404}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:cancel,status:422}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "http_req_duration{endpoint:confirm}": {
+            "avg": 172.63767360000003,
+            "min": 86.422454,
+            "med": 166.675744,
+            "max": 306.449135,
+            "p(90)": 235.97933450000002,
+            "p(95)": 251.167903,
+            "p(99)": 282.1506373700001,
+            "count": 100,
+            "thresholds": {
+                "max>=0": false
+            }
+        },
+        "unexpected_status": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count==0": false
+            }
+        },
+        "responses{endpoint:seats,status:200}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "http_reqs": {
+            "count": 5103,
+            "rate": 508.913741766763
+        },
+        "responses{endpoint:hold,status:0}": {
+            "rate": 0,
+            "count": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:cancel,status:502}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "http_req_blocked": {
+            "p(99)": 2.872948419999987,
+            "count": 5103,
+            "avg": 0.16252411738193223,
+            "min": 0.003852,
+            "med": 0.008597,
+            "max": 20.203949,
+            "p(90)": 0.3628286000000001,
+            "p(95)": 0.5146633999999997
+        },
+        "responses{endpoint:hold,status:503}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:seats,status:400}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:confirm,status:402}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "http_req_receiving": {
+            "p(90)": 0.17874700000000004,
+            "p(95)": 0.26115949999999954,
+            "p(99)": 0.9870306999999983,
+            "count": 5103,
+            "avg": 0.14452924181853793,
+            "min": 0.021923,
+            "med": 0.104908,
+            "max": 10.683674
+        },
+        "responses{endpoint:confirm,status:409}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:confirm,status:502}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "http_req_duration{endpoint:cancel}": {
+            "p(95)": 0,
+            "p(99)": 0,
+            "count": 0,
+            "avg": 0,
+            "min": 0,
+            "med": 0,
+            "max": 0,
+            "p(90)": 0,
+            "thresholds": {
+                "max>=0": false
+            }
+        },
+        "responses{endpoint:confirm,status:503}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:seats,status:409}": {
+            "rate": 0,
+            "count": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:cancel,status:410}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:hold,status:402}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "http_req_failed": {
+            "passes": 0,
+            "fails": 5103,
+            "value": 0
+        },
+        "responses{endpoint:hold,status:409}": {
+            "count": 4901,
+            "rate": 488.76861618634246,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:seats,status:404}": {
+            "rate": 0,
+            "count": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:cancel,status:504}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:confirm,status:400}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:cancel,status:404}": {
+            "rate": 0,
+            "count": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "iteration_duration": {
+            "count": 5001,
+            "avg": 9.741271328334312,
+            "min": 1.660488,
+            "med": 4.074508,
+            "max": 355.857639,
+            "p(90)": 9.989924,
+            "p(95)": 19.46926,
+            "p(99)": 210.282232
+        },
+        "seat_conflicts": {
+            "count": 4901,
+            "rate": 488.76861618634246
+        },
+        "http_req_duration": {
+            "p(90)": 9.713919400000012,
+            "p(95)": 20.623179999999966,
+            "p(99)": 164.7874382399997,
+            "count": 5103,
+            "avg": 8.812398385263553,
+            "min": 1.257552,
+            "med": 3.597771,
+            "max": 306.449135
+        },
+        "responses{endpoint:hold,status:200}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "vus": {
+            "min": 1,
+            "max": 12,
+            "value": 2
+        },
+        "responses{endpoint:confirm,status:0}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "hold_to_booked": {
+            "max": 356,
+            "p(90)": 294.3,
+            "p(95)": 321.29999999999995,
+            "p(99)": 350.06000000000006,
+            "count": 100,
+            "avg": 212.66,
+            "min": 94,
+            "med": 212
+        },
+        "responses{endpoint:seats,status:502}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "dropped_iterations": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count==0": false
+            }
+        },
+        "responses{endpoint:hold,status:500}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "http_req_tls_handshaking": {
+            "p(99)": 0,
+            "count": 5103,
+            "avg": 0,
+            "min": 0,
+            "med": 0,
+            "max": 0,
+            "p(90)": 0,
+            "p(95)": 0
+        },
+        "data_received": {
+            "count": 1299281,
+            "rate": 129575.14311512084
+        },
+        "responses{endpoint:hold,status:502}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:seats,status:410}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:hold,status:504}": {
+            "rate": 0,
+            "count": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:seats,status:402}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:cancel,status:201}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "iterations": {
+            "count": 5001,
+            "rate": 498.7414506320952
+        },
+        "responses{endpoint:confirm,status:404}": {
+            "rate": 0,
+            "count": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "bookings_ok": {
+            "rate": 9.972834445752753,
+            "count": 100
+        },
+        "responses{endpoint:cancel,status:400}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses": {
+            "count": 5101,
+            "rate": 508.71428507784793
+        },
+        "vus_max": {
+            "max": 600,
+            "value": 600,
+            "min": 600
+        },
+        "responses{endpoint:seats,status:201}": {
+            "rate": 0,
+            "count": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:confirm,status:200}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "holds_created": {
+            "count": 100,
+            "rate": 9.972834445752753
+        },
+        "responses{endpoint:cancel,status:503}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:seats,status:500}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:cancel,status:402}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "data_sent": {
+            "count": 1057287,
+            "rate": 105441.48212646591
+        },
+        "responses{endpoint:confirm,status:504}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:hold,status:400}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:confirm,status:410}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:cancel,status:0}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        }
+    },
+    "setup_data": {
+        "seats": [
+            17721,
+            17722,
+            17723,
+            17724,
+            17725,
+            17726,
+            17727,
+            17728,
+            17729,
+            17730,
+            17731,
+            17732,
+            17733,
+            17734,
+            17735,
+            17736,
+            17737,
+            17738,
+            17739,
+            17740,
+            17741,
+            17742,
+            17743,
+            17744,
+            17745,
+            17746,
+            17747,
+            17748,
+            17749,
+            17750,
+            17751,
+            17752,
+            17753,
+            17754,
+            17755,
+            17756,
+            17757,
+            17758,
+            17759,
+            17760,
+            17761,
+            17762,
+            17763,
+            17764,
+            17765,
+            17766,
+            17767,
+            17768,
+            17769,
+            17770,
+            17771,
+            17772,
+            17773,
+            17774,
+            17775,
+            17776,
+            17777,
+            17778,
+            17779,
+            17780,
+            17781,
+            17782,
+            17783,
+            17784,
+            17785,
+            17786,
+            17787,
+            17788,
+            17789,
+            17790,
+            17791,
+            17792,
+            17793,
+            17794,
+            17795,
+            17796,
+            17797,
+            17798,
+            17799,
+            17800,
+            17801,
+            17802,
+            17803,
+            17804,
+            17805,
+            17806,
+            17807,
+            17808,
+            17809,
+            17810,
+            17811,
+            17812,
+            17813,
+            17814,
+            17815,
+            17816,
+            17817,
+            17818,
+            17819,
+            17820
+        ],
+        "showId": 88,
+        "popular": [
+            17721,
+            17722,
+            17723,
+            17724,
+            17725,
+            17726,
+            17727,
+            17728,
+            17729,
+            17730,
+            17731,
+            17732,
+            17733,
+            17734,
+            17735,
+            17736,
+            17737,
+            17738,
+            17739,
+            17740
+        ]
+    },
+    "root_group": {
+        "name": "",
+        "path": "",
+        "id": "d41d8cd98f00b204e9800998ecf8427e",
+        "groups": {},
+        "checks": {}
+    }
+}

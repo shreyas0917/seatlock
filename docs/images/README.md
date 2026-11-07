@@ -30,6 +30,10 @@ Use a browser window of **1920×1080**, the dashboard time range **"Last 15 minu
 | `prometheus-alerts.png` | http://localhost:9095/alerts | The alert rules list (all green / inactive), showing `DoubleBookingDetected` and the others |
 | `prometheus-alert-firing.png` *(optional)* | http://localhost:9095/alerts | Stop Redis (`docker compose stop redis`), send a few holds, wait 1 minute: `RedisLockUnavailable` firing. Then `docker compose start redis` |
 
+## Phase 6: load test and chaos screenshots
+
+The list of benchmark and chaos screenshots (which run, which time window, which panels) is in [docs/benchmarks/RESULTS.md](../benchmarks/RESULTS.md#grafana-screenshots-to-take). Save them here with the file names given there.
+
 Tips:
 - Grafana opens without a login (anonymous viewer). Press `Esc` to leave panel view, and use the browser's full-screen (F11) for a clean shot.
 - To hide the Grafana side menu, add `?kiosk` to the dashboard URL: http://localhost:3001/d/seatlock-reliability?kiosk

@@ -1,0 +1,715 @@
+{
+    "root_group": {
+        "name": "",
+        "path": "",
+        "id": "d41d8cd98f00b204e9800998ecf8427e",
+        "groups": {},
+        "checks": {}
+    },
+    "metrics": {
+        "unexpected_status": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count==0": false
+            }
+        },
+        "responses{endpoint:hold,status:503}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "holds_created": {
+            "count": 100,
+            "rate": 9.972454271302214
+        },
+        "responses{endpoint:cancel,status:400}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:cancel,status:504}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:seats,status:409}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:seats,status:404}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:cancel,status:201}": {
+            "rate": 0,
+            "count": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "vus_max": {
+            "value": 600,
+            "min": 600,
+            "max": 600
+        },
+        "responses{endpoint:hold,status:409}": {
+            "count": 4901,
+            "rate": 488.7499838365215,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:hold,status:201}": {
+            "count": 100,
+            "rate": 9.972454271302214,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:cancel,status:410}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:hold,status:200}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:confirm,status:402}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:confirm,status:503}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:hold,status:422}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:confirm,status:200}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:hold,status:500}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:seats,status:200}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:cancel,status:503}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "http_reqs": {
+            "count": 5103,
+            "rate": 508.8943414645519
+        },
+        "dropped_iterations": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count==0": false
+            }
+        },
+        "responses{endpoint:seats,status:400}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:confirm,status:502}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "vus": {
+            "min": 2,
+            "max": 104,
+            "value": 3
+        },
+        "http_req_duration{expected_response:true}": {
+            "min": 1.411654,
+            "med": 5.671803,
+            "max": 658.814611,
+            "p(90)": 61.321009200000034,
+            "p(95)": 121.5642786999999,
+            "p(99)": 369.00842489999985,
+            "count": 5103,
+            "avg": 25.83162000529107
+        },
+        "http_req_tls_handshaking": {
+            "max": 0,
+            "p(90)": 0,
+            "p(95)": 0,
+            "p(99)": 0,
+            "count": 5103,
+            "avg": 0,
+            "min": 0,
+            "med": 0
+        },
+        "iterations": {
+            "count": 5001,
+            "rate": 498.7224381078237
+        },
+        "responses{endpoint:hold,status:404}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:cancel,status:0}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "http_req_duration{endpoint:cancel}": {
+            "min": 0,
+            "med": 0,
+            "max": 0,
+            "p(90)": 0,
+            "p(95)": 0,
+            "p(99)": 0,
+            "count": 0,
+            "avg": 0,
+            "thresholds": {
+                "max>=0": false
+            }
+        },
+        "responses{endpoint:hold,status:0}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "http_req_duration{endpoint:confirm}": {
+            "max": 658.814611,
+            "p(90)": 608.1200149,
+            "p(95)": 637.44890115,
+            "p(99)": 652.05719275,
+            "count": 100,
+            "avg": 344.62022188999987,
+            "min": 95.036724,
+            "med": 377.849689,
+            "thresholds": {
+                "max>=0": false
+            }
+        },
+        "responses{endpoint:confirm,status:422}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "bookings_ok": {
+            "count": 100,
+            "rate": 9.972454271302214
+        },
+        "http_req_waiting": {
+            "max": 658.707618,
+            "p(90)": 60.43251200000003,
+            "p(95)": 121.47079659999987,
+            "p(99)": 368.86084175999974,
+            "count": 5103,
+            "avg": 25.490849434842357,
+            "min": 1.286221,
+            "med": 5.396687
+        },
+        "responses": {
+            "count": 5101,
+            "rate": 508.6948923791259
+        },
+        "responses{endpoint:seats,status:410}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "http_req_connecting": {
+            "med": 0,
+            "max": 64.535436,
+            "p(90)": 0.23569760000000006,
+            "p(95)": 0.44821319999999837,
+            "p(99)": 5.318818219999983,
+            "count": 5103,
+            "avg": 0.22519251636292367,
+            "min": 0
+        },
+        "hold_to_booked": {
+            "avg": 494.36,
+            "min": 108,
+            "med": 550.5,
+            "max": 802,
+            "p(90)": 769.1,
+            "p(95)": 777.05,
+            "p(99)": 794.08,
+            "count": 100
+        },
+        "http_req_receiving": {
+            "p(90)": 0.2392676000000002,
+            "p(95)": 0.44908229999999927,
+            "p(99)": 1.8677478599999628,
+            "count": 5103,
+            "avg": 0.1879033613560644,
+            "min": 0.022137,
+            "med": 0.102482,
+            "max": 16.342371
+        },
+        "responses{endpoint:cancel,status:422}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:seats,status:502}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:hold,status:400}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "http_req_duration{endpoint:seats}": {
+            "max": 0,
+            "p(90)": 0,
+            "p(95)": 0,
+            "p(99)": 0,
+            "count": 0,
+            "avg": 0,
+            "min": 0,
+            "med": 0,
+            "thresholds": {
+                "max>=0": false
+            }
+        },
+        "responses{endpoint:hold,status:502}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:hold,status:402}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:seats,status:500}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "http_req_failed": {
+            "passes": 0,
+            "fails": 5103,
+            "value": 0
+        },
+        "responses{endpoint:hold,status:504}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "seat_conflicts": {
+            "count": 4901,
+            "rate": 488.7499838365215
+        },
+        "responses{endpoint:cancel,status:409}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:cancel,status:404}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:seats,status:201}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "http_req_duration": {
+            "min": 1.411654,
+            "med": 5.671803,
+            "max": 658.814611,
+            "p(90)": 61.321009200000034,
+            "p(95)": 121.5642786999999,
+            "p(99)": 369.00842489999985,
+            "count": 5103,
+            "avg": 25.83162000529107
+        },
+        "responses{endpoint:confirm,status:410}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:confirm,status:504}": {
+            "rate": 0,
+            "count": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "iteration_duration": {
+            "p(90)": 56.704752,
+            "p(95)": 109.977346,
+            "p(99)": 549.676128,
+            "count": 5001,
+            "avg": 27.58577970385916,
+            "min": 1.753482,
+            "med": 6.255694,
+            "max": 802.035993
+        },
+        "responses{endpoint:seats,status:422}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:confirm,status:400}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:hold,status:410}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "http_req_sending": {
+            "p(95)": 0.34893269999999993,
+            "p(99)": 1.7979494599999934,
+            "count": 5103,
+            "avg": 0.1528672090926906,
+            "min": 0.012495,
+            "med": 0.061559,
+            "max": 29.459931,
+            "p(90)": 0.1593304
+        },
+        "http_req_blocked": {
+            "p(99)": 6.445773859999961,
+            "count": 5103,
+            "avg": 0.28588459847148834,
+            "min": 0.003774,
+            "med": 0.01009,
+            "max": 64.623711,
+            "p(90)": 0.36995340000000004,
+            "p(95)": 0.8548772999999942
+        },
+        "http_req_duration{endpoint:hold}": {
+            "avg": 19.464112215956835,
+            "min": 1.411654,
+            "med": 5.495681,
+            "max": 369.016681,
+            "p(90)": 49.52194,
+            "p(95)": 93.552941,
+            "p(99)": 182.35162,
+            "count": 5001,
+            "thresholds": {
+                "max>=0": false
+            }
+        },
+        "responses{endpoint:confirm,status:0}": {
+            "rate": 0,
+            "count": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "data_sent": {
+            "count": 1057367,
+            "rate": 105445.44055484007
+        },
+        "responses{endpoint:cancel,status:502}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:confirm,status:500}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:cancel,status:200}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:cancel,status:500}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:seats,status:0}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:confirm,status:409}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:seats,status:503}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:seats,status:402}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:seats,status:504}": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:cancel,status:402}": {
+            "rate": 0,
+            "count": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "data_received": {
+            "count": 1299323,
+            "rate": 129574.39201151206
+        },
+        "responses{endpoint:confirm,status:404}": {
+            "rate": 0,
+            "count": 0,
+            "thresholds": {
+                "count>=0": false
+            }
+        },
+        "responses{endpoint:confirm,status:201}": {
+            "count": 100,
+            "rate": 9.972454271302214,
+            "thresholds": {
+                "count>=0": false
+            }
+        }
+    },
+    "setup_data": {
+        "popular": [
+            17721,
+            17722,
+            17723,
+            17724,
+            17725,
+            17726,
+            17727,
+            17728,
+            17729,
+            17730,
+            17731,
+            17732,
+            17733,
+            17734,
+            17735,
+            17736,
+            17737,
+            17738,
+            17739,
+            17740
+        ],
+        "seats": [
+            17721,
+            17722,
+            17723,
+            17724,
+            17725,
+            17726,
+            17727,
+            17728,
+            17729,
+            17730,
+            17731,
+            17732,
+            17733,
+            17734,
+            17735,
+            17736,
+            17737,
+            17738,
+            17739,
+            17740,
+            17741,
+            17742,
+            17743,
+            17744,
+            17745,
+            17746,
+            17747,
+            17748,
+            17749,
+            17750,
+            17751,
+            17752,
+            17753,
+            17754,
+            17755,
+            17756,
+            17757,
+            17758,
+            17759,
+            17760,
+            17761,
+            17762,
+            17763,
+            17764,
+            17765,
+            17766,
+            17767,
+            17768,
+            17769,
+            17770,
+            17771,
+            17772,
+            17773,
+            17774,
+            17775,
+            17776,
+            17777,
+            17778,
+            17779,
+            17780,
+            17781,
+            17782,
+            17783,
+            17784,
+            17785,
+            17786,
+            17787,
+            17788,
+            17789,
+            17790,
+            17791,
+            17792,
+            17793,
+            17794,
+            17795,
+            17796,
+            17797,
+            17798,
+            17799,
+            17800,
+            17801,
+            17802,
+            17803,
+            17804,
+            17805,
+            17806,
+            17807,
+            17808,
+            17809,
+            17810,
+            17811,
+            17812,
+            17813,
+            17814,
+            17815,
+            17816,
+            17817,
+            17818,
+            17819,
+            17820
+        ],
+        "showId": 88
+    }
+}

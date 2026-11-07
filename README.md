@@ -12,10 +12,22 @@ SeatLock is a backend-only system design project (think BookMyShow). It follows 
 - **PostgreSQL** = the authority for holds, hold expiry, payments, **idempotency keys**, the outbox and bookings. Redis can never override a failed PostgreSQL check, every expiry decision uses the database clock (`NOW()`), and **nothing in the confirm/payment path depends on Redis**.
 - **A background worker** repairs everything the request path leaves behind, using **the same code** as the API.
 - **Every correctness rule is a live metric**: the `verify.sql` invariants run every 15s and fire an alert the moment one breaks, on a provisioned Grafana dashboard.
+- **Load- and chaos-tested, with honest numbers**: k6 rush, capacity, spike and soak tests, five chaos tests under load, and a k6 smoke test in CI that fails the build on any double booking.
+
+## Results
+
+Measured on **one laptop** (Intel i5-1135G7, 4 cores / 8 threads; Docker Desktop with 8 CPUs and 7.76 GiB). SeatLock, Postgres, Redis, Prometheus, Grafana **and the load generator** all shared those CPUs. These are single-machine local numbers, **not production capacity**. Medians of 3 runs; full method, ranges, environment and raw files in [docs/benchmarks/RESULTS.md](docs/benchmarks/RESULTS.md).
+
+| | |
+|---|---|
+| **Flash sale** | **5,000 booking attempts in a 10-second burst on 100 seats** -> exactly **100 bookings, 100 charges**, 0 unexpected statuses, `verify.sql` 0 rows (3 of 3 runs); hold p95 15 ms |
+| **Capacity (the knee)** | **~514 requests/s** (400 user actions/s, realistic mix) with p95 hold 86 ms and 0 errors, the conservative knee on a throttling laptop CPU (600 actions/s also passed; see the doc for why 400 is quoted) |
+| **Chaos under load** | Redis killed, an API replica killed, the worker killed, a 3 s gateway, a Postgres restart: **0 double bookings, 0 double charges** in all 5; recovery without manual steps |
+| **Bottleneck fixed** | DB pool round trips: **2.45 -> 1.67 per request**; p95 seat map **−39%**, p95 hold **−17%** at 600 actions/s (median of 9 runs) |
 
 ## Tech stack
 
-Go · chi · PostgreSQL 16 (pgx, hand-written SQL) · Redis 7 (go-redis) · golang-migrate · slog · Prometheus · Grafana · Swagger (swag) · Docker Compose · GitHub Actions
+Go · chi · PostgreSQL 16 (pgx, hand-written SQL) · Redis 7 (go-redis) · golang-migrate · slog · Prometheus · Grafana · k6 · nginx · Swagger (swag) · Docker Compose · GitHub Actions
 
 ## Quick start
 
@@ -233,6 +245,32 @@ make reset-data                      # free all seats (keeps shows/seats; clears
 
 `make up-demo` uses [docker-compose.demo.yml](docker-compose.demo.yml) (20s holds, reconcile after 15s, fast intervals); `make up` switches back. Every demo prints PASS/FAIL per step and the gateway's stats, exits non-zero on any failure, and ends with [demo/verify.sql](demo/verify.sql): **11 invariant checks** (generated from [internal/invariants/checks.go](internal/invariants/checks.go), the same checks the worker exports as live gauges) that must all return 0 rows (no double booking, every booking backed by exactly one `SUCCEEDED` payment, no money taken without a seat or a refund, no `PENDING` payment or `REFUND_PENDING` older than 15 minutes, no forgotten expired hold, …).
 
+## Load tests and chaos
+
+Everything runs in Docker (k6 included; nothing to install) against `make up-bench`: the normal settings, plus a mock gateway that takes a realistic 50–150 ms per charge.
+
+```bash
+make up-bench && make seed-load          # stack + load data (1 rush show, 1 smoke show, 200 shows x 200 seats)
+
+RUNS=3 ./loadtest/run.sh rush            # 5,000 booking attempts on 100 seats in 10 s -> exactly 100 bookings
+RUNS=3 ./loadtest/capacity.sh            # step the arrival rate up and report the knee
+RUNS=3 ./loadtest/run.sh spike           # 10x traffic for 30 s, latency must recover
+K6_ENV="SOAK_DURATION=10m" ./loadtest/run.sh soak   # heap, goroutines, pools, backlog must stay flat
+
+./chaos/redis-down.sh                    # Redis killed 30 s under load: holds fail closed, confirms still work
+./chaos/worker-kill.sh                   # worker SIGKILLed: the PENDING backlog drains exactly once
+./chaos/slow-gateway.sh                  # 3 s gateway: confirms slow down, holds don't
+./chaos/postgres-restart.sh              # 503s (never 500s), /readyz flips, self-recovery
+make up-scale && ./chaos/api-replica.sh  # 1 of 2 replicas behind nginx killed: same-key retry, 0 double charges
+```
+
+- **Open-model load** (arrival rates), so a slow server can't hide behind fewer requests.
+- **409 is a correct answer**: responses are classified as expected, shed (`503 SERVICE_BUSY`) or unexpected, and only unexpected ones fail a run.
+- **After every run the script checks correctness**, not just speed: time to consistency, exact booking counts, gateway charges == bookings + refunds, `verify.sql` 0 rows, fresh invariant gauges at 0.
+- Each run records its environment (`loadtest/env.sh`) and k6's own CPU and memory.
+- pprof runs on the internal metrics ports (`:9091` / `:9092` `/debug/pprof`) for profiling under load.
+- **CI** runs a k6 smoke test on every push to `main` and every PR: 200 attempts on 20 seats, and the build fails unless there are exactly 20 bookings and `verify.sql` returns 0 rows. Locally: `VERIFY_LOAD=1 scripts/verify.sh`.
+
 ## Configuration
 
 | Variable | Default | Purpose |
@@ -262,6 +300,7 @@ make reset-data                      # free all seats (keeps shows/seats; clears
 | `METRICS_ADDR` | api `:9091`, worker `:9092` | Internal port for `/metrics` and `/debug/pprof` (never the public API port) |
 | `PPROF_BLOCK_RATE` / `PPROF_MUTEX_FRACTION` | `0` / `0` (off) | Go block and mutex profiles; turn on only while profiling |
 | `PROMETHEUS_PORT` / `GRAFANA_PORT` / `GRAFANA_ADMIN_PASSWORD` | `9095` / `3001` / `admin` | Observability (Grafana viewing needs no login) |
+| `LB_PORT` | `8088` | nginx load balancer of the `scale` profile (`make up-scale`) |
 | `PAYMENT_PORT` / `PAYMENT_FAIL_RATE` / `PAYMENT_MIN_DELAY` / `PAYMENT_MAX_DELAY` / `PAYMENT_SLOW_DELAY` | `8095` / `0` / `0s` / `0s` / `3s` | Mock gateway (demos) |
 
 ## Known limitations (to be addressed in later phases)
@@ -273,12 +312,14 @@ make reset-data                      # free all seats (keeps shows/seats; clears
 - **A seat whose payment is in flight stays blocked** for up to `PENDING_HOLD_MAX` (10m) past its expiry if the gateway is unreachable. That is the price of not handing a possibly-paid seat to someone else; a late successful charge is then refunded.
 - **A confirm with a new key after the booking exists** answers `409 HOLD_ALREADY_USED`.
 - **Dead letters need a human** (`make outbox-retry ID=<id>`); `OutboxDeadLetters` flags them.
+- **The benchmark numbers come from one laptop**, with the load generator on the same CPUs. They are a lower bound on that hardware, not production capacity. The soak is 10 minutes, not hours. See [docs/benchmarks/RESULTS.md](docs/benchmarks/RESULTS.md).
+- **No load shedding before the database timeout.** Past the knee, latency grows to seconds before requests are shed with `503 SERVICE_BUSY` (at `DB_QUERY_TIMEOUT`). An admission limit (or the waiting room) would shed earlier.
 
 ## Project layout
 
 ```
 cmd/api/              HTTP server entry point (wiring, graceful shutdown)
-cmd/worker/           background worker entry point (4 jobs, graceful shutdown)
+cmd/worker/           background worker entry point (5 jobs, graceful shutdown)
 cmd/payment/          mock payment gateway binary
 cmd/migrate/          `make migrate-up` / `make migrate-down`
 internal/config/      environment variables + the worker's safety checks
@@ -296,15 +337,20 @@ internal/httpapi/     handlers, router, JSON helpers, error -> HTTP status mappi
 db/migrations/        SQL schema (embedded into the binary)
 db/seed/              demo data
 docs/                 Swagger output, architecture diagram, learning notes
+docs/benchmarks/      RESULTS.md and the k6 summaries of the final runs
 demo/                 demo scripts + verify.sql
+loadtest/             k6 scripts (rush, capacity, spike, soak, smoke), run.sh, capacity.sh, report tool
+chaos/                chaos scripts (Redis, api replica, worker, slow gateway, Postgres) run under load
+deploy/lb/            nginx config of the `scale` profile
 scripts/verify.sh     the push gate (also run by CI)
 docker-compose.demo.yml  short timings for the worker demos (`make up-demo`)
+docker-compose.bench.yml realistic 50-150 ms gateway for the load tests (`make up-bench`)
 monitoring/           prometheus.yml, alerts.yml (+ promtool tests), Grafana provisioning and dashboard
 ```
 
 ## Make targets
 
-`up` · `up-demo` · `down` · `logs` · `run` · `test` · `test-integration` · `verify` · `verify-sql` · `migrate-up` · `migrate-down` · `seed` · `reset-data` · `outbox-retry` · `swagger` · `lint`
+`up` · `up-demo` · `up-bench` · `up-scale` · `down` · `logs` · `run` · `test` · `test-integration` · `verify` · `verify-sql` · `migrate-up` · `migrate-down` · `seed` · `seed-load` · `reset-data` · `outbox-retry` · `swagger` · `lint`
 
 `make swagger` needs the swag CLI once: `go install github.com/swaggo/swag/cmd/swag@v1.16.4`
 
@@ -316,6 +362,6 @@ monitoring/           prometheus.yml, alerts.yml (+ promtool tests), Grafana pro
 - [x] Phase 3: Payments (mock gateway), idempotency keys in PostgreSQL, refund on expiry, outbox, CI
 - [x] Phase 4: Background worker: reconcile abandoned payments (with void), drain the outbox (backoff, dead letters), expire holds, clean up keys
 - [x] Phase 5: Observability: Prometheus metrics (RED, domain, pools, worker), invariants as live gauges, 9 alerts, provisioned Grafana dashboard
-- [ ] Phase 6: k6 load tests
-- [ ] Phase 7: Chaos scripts, full CI
+- [x] Phase 6: k6 load tests (rush, capacity, spike, 10-minute soak), five chaos tests under load, one measured bottleneck fixed, results in [docs/benchmarks/RESULTS.md](docs/benchmarks/RESULTS.md)
+- [ ] Phase 7: Chaos scripts, full CI (**the CI part is done**: the k6 smoke test runs on every push and PR; chaos scripts were done in Phase 6)
 - [ ] Phase 8: To be defined

@@ -1,0 +1,71 @@
+{
+  "duration_s": 60,
+  "responses": 46210,
+  "rps": 770.1666666666666,
+  "endpoints": {
+    "cancel": {
+      "count": 5265,
+      "rps": 87.75,
+      "p50_ms": 17.383334,
+      "p95_ms": 52.96743820000003,
+      "p99_ms": 82.86886691999995,
+      "statuses": {
+        "200": 5265
+      }
+    },
+    "confirm": {
+      "count": 4944,
+      "rps": 82.4,
+      "p50_ms": 144.3176445,
+      "p95_ms": 213.20390154999998,
+      "p99_ms": 264.3493864199999,
+      "statuses": {
+        "201": 4944
+      }
+    },
+    "hold": {
+      "count": 10884,
+      "rps": 181.4,
+      "p50_ms": 11.6547935,
+      "p95_ms": 49.190027450000045,
+      "p99_ms": 96.60153376000001,
+      "statuses": {
+        "201": 10209,
+        "409": 675
+      }
+    },
+    "seats": {
+      "count": 25117,
+      "rps": 418.6166666666667,
+      "p50_ms": 2.771763,
+      "p95_ms": 17.895893,
+      "p99_ms": 50.36525244,
+      "statuses": {
+        "200": 25117
+      }
+    }
+  },
+  "counters": {
+    "bookings_ok": 4944,
+    "confirm_402": 0,
+    "confirm_410": 0,
+    "confirm_504": 0,
+    "confirm_retries": 0,
+    "dropped_iterations": 0,
+    "holds_created": 10209,
+    "iterations": 36001,
+    "lock_unavailable_503": 0,
+    "seat_conflicts": 675,
+    "shed_503": 0,
+    "status_500": 0,
+    "unexpected_status": 0
+  },
+  "hold_to_booked_ms": {
+    "p50": 160,
+    "p95": 253.84999999999945,
+    "p99": 325.5699999999997
+  },
+  "unexpected_pct": 0,
+  "shed_pct": 0,
+  "shed_plus_unexpected_pct": 0
+}
