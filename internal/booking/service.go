@@ -44,6 +44,7 @@ type Repository interface {
 	CompletePayment(ctx context.Context, paymentID int64, chargeID string) (CompleteResult, error)
 	MarkPaymentDeclined(ctx context.Context, paymentID int64) error
 	MarkPaymentAbandoned(ctx context.Context, paymentID int64) error
+	RecordReconcileFailure(ctx context.Context, paymentID int64, failure string) error
 	MarkRefunded(ctx context.Context, paymentID, outboxID int64) (Payment, error)
 	RecordOutboxFailure(ctx context.Context, outboxID int64, failure string) error
 }

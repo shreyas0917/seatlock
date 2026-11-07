@@ -98,6 +98,10 @@ func (s *stubRepository) MarkPaymentDeclined(ctx context.Context, paymentID int6
 
 func (s *stubRepository) MarkPaymentAbandoned(ctx context.Context, paymentID int64) error { return nil }
 
+func (s *stubRepository) RecordReconcileFailure(ctx context.Context, paymentID int64, failure string) error {
+	return nil
+}
+
 func (s *stubRepository) MarkRefunded(ctx context.Context, paymentID, outboxID int64) (booking.Payment, error) {
 	return booking.Payment{ID: paymentID, Status: booking.PaymentRefunded}, nil
 }

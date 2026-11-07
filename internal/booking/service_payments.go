@@ -107,7 +107,7 @@ func (s *Service) ConfirmBooking(ctx context.Context, in ConfirmInput) (Booking,
 	}
 
 	// Tx B: the money was taken. Book, or record that a refund is owed.
-	result, err := s.repo.CompletePayment(ctx, payment.ID, charge.ChargeID)
+	result, err := s.completeCharged(ctx, payment, charge.ChargeID)
 	if err != nil {
 		// Money taken, but we could not record the outcome (e.g. a database
 		// timeout). The payment is still PENDING; a retry replays the charge
@@ -117,25 +117,38 @@ func (s *Service) ConfirmBooking(ctx context.Context, in ConfirmInput) (Booking,
 
 	switch result.Kind {
 	case Booked:
-		// The seat is sold, so its Redis lock is no longer needed. Best
-		// effort: a leftover lock on a BOOKED seat is harmless (Postgres
-		// rejects new holds on it) and expires by its TTL.
-		s.releaseLock(ctx, result.Booking.ShowID, result.Booking.SeatID, in.UserID)
 		return result.Booking, nil
-
 	case RefundRequired:
+		// The user is waiting for this answer, so try to give the money back
+		// right away; the outbox row (committed in Tx B) is the guarantee.
 		status := s.refundInline(ctx, result.Payment, charge.ChargeID, result.OutboxID)
-		// The hold is dead (EXPIRED or RELEASED), so its Redis lock guards
-		// nothing: give it back, or the seat would look "held" in Redis
-		// while Postgres already shows it AVAILABLE. Owner-checked, so it
-		// can never delete a NEW lock taken by another user meanwhile.
-		s.releaseLock(ctx, result.ShowID, result.SeatID, in.UserID)
 		return Booking{}, &HoldExpiredError{PaymentStatus: status}
-
 	default: // AlreadyRefunding: an earlier request already decided to refund.
-		s.releaseLock(ctx, result.ShowID, result.SeatID, in.UserID)
 		return Booking{}, &HoldExpiredError{PaymentStatus: result.Payment.Status}
 	}
+}
+
+// completeCharged is what happens after the gateway says a charge SUCCEEDED,
+// used by BOTH ConfirmBooking (the request path) and ReconcilePayment (the
+// worker), so the rules exist in exactly one place: Tx B (CompletePayment,
+// which books, or records an owed refund, and never refunds a booked
+// payment), then release the hold's Redis lock, which guards nothing anymore:
+//   - Booked: the seat is sold. A leftover lock on a BOOKED seat would be
+//     harmless (Postgres rejects new holds on it), but there is no reason
+//     to keep it.
+//   - RefundRequired / AlreadyRefunding: the hold is dead (EXPIRED or
+//     RELEASED). Keeping the lock would make Redis say "held" while
+//     Postgres already shows the seat AVAILABLE.
+//
+// The release is owner-checked, so it can never delete a NEW lock that
+// another user took meanwhile.
+func (s *Service) completeCharged(ctx context.Context, payment Payment, chargeID string) (CompleteResult, error) {
+	result, err := s.repo.CompletePayment(ctx, payment.ID, chargeID)
+	if err != nil {
+		return CompleteResult{}, err
+	}
+	s.releaseLock(ctx, result.ShowID, result.SeatID, payment.UserID)
+	return result, nil
 }
 
 // refundInline tries to refund right away, so the user gets their money back

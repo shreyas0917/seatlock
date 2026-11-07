@@ -44,6 +44,8 @@ type fakeRepository struct {
 	// expireDuringPayment makes CompletePayment act as if the hold expired
 	// while the gateway was working.
 	expireDuringPayment bool
+	// reconcileFailures lists the errors recorded by RecordReconcileFailure.
+	reconcileFailures []string
 }
 
 // newFakeRepository returns a fake with show 1 (seats 1 and 2) and show 2 (seat 3).
@@ -184,7 +186,7 @@ func (f *fakeRepository) CompletePayment(ctx context.Context, paymentID int64, c
 	if p.Status == PaymentSucceeded {
 		for _, b := range f.bookings {
 			if b.HoldID == h.ID {
-				return CompleteResult{Kind: Booked, Booking: b, Payment: p}, nil
+				return CompleteResult{Kind: Booked, Booking: b, Payment: p, ShowID: h.ShowID, SeatID: h.SeatID}, nil
 			}
 		}
 	}
@@ -203,7 +205,7 @@ func (f *fakeRepository) CompletePayment(ctx context.Context, paymentID int64, c
 	p.Status = PaymentSucceeded
 	p.ProviderChargeID = chargeID
 	f.payments[p.ID] = p
-	return CompleteResult{Kind: Booked, Booking: b, Payment: p}, nil
+	return CompleteResult{Kind: Booked, Booking: b, Payment: p, ShowID: h.ShowID, SeatID: h.SeatID}, nil
 }
 
 func (f *fakeRepository) MarkPaymentDeclined(ctx context.Context, paymentID int64) error {
@@ -212,6 +214,13 @@ func (f *fakeRepository) MarkPaymentDeclined(ctx context.Context, paymentID int6
 	p := f.payments[paymentID]
 	p.Status = PaymentDeclined
 	f.payments[paymentID] = p
+	return nil
+}
+
+func (f *fakeRepository) RecordReconcileFailure(ctx context.Context, paymentID int64, failure string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reconcileFailures = append(f.reconcileFailures, failure)
 	return nil
 }
 
@@ -310,13 +319,19 @@ func newTestServiceWithGateway() (*Service, *fakeRepository, *fakeLocker, *fakeG
 // fakeGateway implements PaymentGateway. chargeErr simulates "no answer",
 // decline makes every charge declined, refundErr makes refunds fail.
 type fakeGateway struct {
-	mu         sync.Mutex
-	chargeErr  error
-	decline    bool
-	voided     bool // every charge answers "voided"
-	refundErr  error
-	chargeKeys []string // every charge key received
-	refunds    int
+	mu        sync.Mutex
+	chargeErr error
+	decline   bool
+	voided    bool // every charge answers "voided"
+	// Lookup answers lookupStatus ("" = not found) or lookupErr; Void
+	// answers voidStatus (default "voided").
+	lookupStatus ChargeStatus
+	lookupErr    error
+	voidStatus   ChargeStatus
+	voids        int
+	refundErr    error
+	chargeKeys   []string // every charge key received
+	refunds      int
 }
 
 func (g *fakeGateway) Charge(ctx context.Context, req ChargeRequest) (ChargeResult, error) {
@@ -336,10 +351,24 @@ func (g *fakeGateway) Charge(ctx context.Context, req ChargeRequest) (ChargeResu
 }
 
 func (g *fakeGateway) Lookup(ctx context.Context, key string) (ChargeResult, error) {
-	return ChargeResult{}, ErrChargeNotFound
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.lookupErr != nil {
+		return ChargeResult{}, g.lookupErr
+	}
+	if g.lookupStatus == "" {
+		return ChargeResult{}, ErrChargeNotFound
+	}
+	return ChargeResult{ChargeID: "ch_" + key, Status: g.lookupStatus}, nil
 }
 
 func (g *fakeGateway) Void(ctx context.Context, key string) (ChargeResult, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.voids++
+	if g.voidStatus != "" {
+		return ChargeResult{ChargeID: "ch_" + key, Status: g.voidStatus}, nil
+	}
 	return ChargeResult{Status: ChargeVoided}, nil
 }
 
