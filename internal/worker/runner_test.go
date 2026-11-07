@@ -57,14 +57,16 @@ func TestRun_RepeatsJobs(t *testing.T) {
 // (which is what makes the WorkerJobStalled alert fire).
 func TestRun_FailedRunDoesNotCountAsSuccess(t *testing.T) {
 	job := &failingJob{}
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 	defer cancel()
 	m := metrics.NewWorker()
+	started := float64(time.Now().UnixNano()) / 1e9
 
 	Run(ctx, []Scheduled{{Job: job, Interval: 10 * time.Millisecond}}, slog.New(slog.NewJSONHandler(io.Discard, nil)), m)
 
 	assert.Greater(t, testutil.ToFloat64(m.WorkerRuns.WithLabelValues("failing", "error")), 0.0)
-	assert.Zero(t, testutil.ToFloat64(m.WorkerLastSuccess.WithLabelValues("failing")))
+	last := testutil.ToFloat64(m.WorkerLastSuccess.WithLabelValues("failing"))
+	assert.InDelta(t, started, last, 0.5, "last success stays at the job's START time (the grace period), never advanced by a failed run")
 }
 
 type failingJob struct{}

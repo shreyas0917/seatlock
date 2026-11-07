@@ -3,7 +3,8 @@
 #   redis    : fast seat lock for holds (an optimisation; Postgres is the authority)
 #   payment  : mock payment gateway (separate binary, cmd/payment)
 #   api      : the SeatLock Go server
-#   worker   : background jobs (reconciler, outbox drainer, hold expirer, key cleanup)
+#   worker   : background jobs (reconciler, outbox drainer, hold expirer, invariants, key cleanup)
+#   prometheus, grafana : metrics, alerts and the "SeatLock — Reliability" dashboard
 # Values come from .env if it exists (see .env.example), otherwise the defaults after ":-".
 
 services:
@@ -127,5 +128,61 @@ services:
       payment:
         condition: service_started
 
+  # ---------------------------------------------------------- observability
+  # Prometheus scrapes the api, worker and payment mock every 5s (their
+  # /metrics ports are reachable only inside this Compose network) and
+  # evaluates monitoring/alerts.yml. Pinned version; memory capped so it
+  # cannot starve the rest of the stack; 2 days of data is plenty for demos.
+  prometheus:
+    image: prom/prometheus:v3.15.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=2d
+    volumes:
+      - ./monitoring:/etc/prometheus:ro
+      - promdata:/prometheus
+    ports:
+      - "${PROMETHEUS_PORT:-9095}:9090"
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:9090/-/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # Grafana: the project's "UI". Datasource and dashboard are provisioned
+  # from monitoring/grafana, and anonymous VIEWER access is on, so
+  # http://localhost:3001 opens the SeatLock dashboard with no manual setup.
+  # (Admin login for editing: admin / GRAFANA_ADMIN_PASSWORD, default admin.)
+  grafana:
+    image: grafana/grafana:13.2.4
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/seatlock-reliability.json
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "${GRAFANA_PORT:-3001}:3000"
+    mem_limit: 256m
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:3000/api/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      # The FIRST start runs Grafana's own database migrations (a few
+      # minutes on a loaded laptop); failures during this period don't count.
+      start_period: 300s
+
 volumes:
   pgdata:
+  promdata:

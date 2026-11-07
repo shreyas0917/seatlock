@@ -97,6 +97,10 @@ func loop(ctx context.Context, s Scheduled, logger *slog.Logger, m *metrics.Metr
 		// Exported so the WorkerJobStalled alert can compare "time since
 		// the last success" with 5 x THIS job's interval, in one rule.
 		m.WorkerInterval.WithLabelValues(s.Job.Name()).Set(s.Interval.Seconds())
+		// Start the clock at process start: a job that NEVER succeeds then
+		// still trips WorkerJobStalled after 5 intervals (with no series at
+		// all, the alert could never fire for it).
+		m.WorkerLastSuccess.WithLabelValues(s.Job.Name()).SetToCurrentTime()
 	}
 	for {
 		select {

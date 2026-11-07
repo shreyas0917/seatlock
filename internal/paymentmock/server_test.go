@@ -215,3 +215,16 @@ func TestRefundFail_FailsTheNextNRefunds(t *testing.T) {
 	assert.Equal(t, StatusRefunded, out["status"])
 	assert.Equal(t, 1, mock.Stats().TotalRefunds)
 }
+
+func TestMetricsEndpoint(t *testing.T) {
+	_, srv := newTestServer(t)
+	post(t, srv.Client(), srv.URL+"/charges", `{"idempotency_key":"pay-1","amount_paise":25000}`, "")
+
+	resp, err := srv.Client().Get(srv.URL + "/metrics")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+
+	assert.Contains(t, string(body), "seatlock_mock_gateway_money_taken 1")
+	assert.Contains(t, string(body), "seatlock_mock_gateway_refunds 0")
+}

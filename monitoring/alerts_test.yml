@@ -1,0 +1,79 @@
+# alerts_test.yml - unit tests for alerts.yml, run with:
+#   promtool test rules monitoring/alerts_test.yml
+# (scripts/verify.sh runs it through the Prometheus Docker image.)
+#
+# Each test feeds synthetic series into the rules and checks which alerts
+# fire at a given time, so the alert logic is proven without any real traffic.
+
+rule_files:
+  - alerts.yml
+
+evaluation_interval: 15s
+
+tests:
+  # DoubleBookingDetected fires on ANY invariant above 0, and not when all are 0.
+  - interval: 15s
+    input_series:
+      - series: 'seatlock_invariant_violations{job="worker",instance="w1:9092",check="double_booking"}'
+        values: '0 0 0 1 1'
+      - series: 'seatlock_invariant_violations{job="worker",instance="w1:9092",check="paid_without_booking"}'
+        values: '0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 30s
+        alertname: DoubleBookingDetected
+        exp_alerts: []
+      - eval_time: 60s
+        alertname: DoubleBookingDetected
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              check: double_booking
+            exp_annotations:
+              summary: "Invariant violated: double_booking"
+              description: 'The invariant check "double_booking" finds 1 violating row(s). This is a correctness incident (double booking, money taken without a seat, or a refunded seat that is still booked). Run demo/verify.sql to see the rows.'
+
+  # WorkerJobStalled fires for a stalled job and NOT for a healthy one.
+  # Healthy: last success keeps up with the clock (value = timestamp).
+  # Stalled: last success stuck at t=0; interval 5s -> fires once 5 x 5s = 25s
+  # have passed without a success.
+  - interval: 15s
+    input_series:
+      - series: 'seatlock_worker_last_success_timestamp_seconds{job="worker",instance="w1:9092",worker_job="outbox_drainer"}'
+        values: '0x20'
+      - series: 'seatlock_worker_job_interval_seconds{job="worker",instance="w1:9092",worker_job="outbox_drainer"}'
+        values: '5x20'
+      - series: 'seatlock_worker_last_success_timestamp_seconds{job="worker",instance="w1:9092",worker_job="hold_expirer"}'
+        values: '0+15x20'
+      - series: 'seatlock_worker_job_interval_seconds{job="worker",instance="w1:9092",worker_job="hold_expirer"}'
+        values: '10x20'
+    alert_rule_test:
+      - eval_time: 15s
+        alertname: WorkerJobStalled
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: WorkerJobStalled
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              worker_job: outbox_drainer
+            exp_annotations:
+              summary: "Worker job outbox_drainer has not succeeded for 5 intervals"
+              description: 'The outbox_drainer job has not completed a successful run for more than 5 times its interval. Its work (reconciling, refunds, expiring holds) is piling up. Check the worker logs for "job run failed".'
+
+  # OutboxDeadLetters fires on a FAILED row.
+  - interval: 15s
+    input_series:
+      - series: 'seatlock_outbox_rows{job="worker",instance="w1:9092",status="FAILED"}'
+        values: '0 0 2'
+    alert_rule_test:
+      - eval_time: 15s
+        alertname: OutboxDeadLetters
+        exp_alerts: []
+      - eval_time: 30s
+        alertname: OutboxDeadLetters
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "2 outbox row(s) dead-lettered"
+              description: "An outbox row (a refund or a Redis lock release) failed OUTBOX_MAX_ATTEMPTS times and is no longer retried. A refund may be owed. Inspect last_error, fix the cause, then `make outbox-retry ID=<id>`."

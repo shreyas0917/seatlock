@@ -1,0 +1,144 @@
+# alerts.yml - SeatLock alert rules (evaluated by Prometheus every 5s).
+#
+# Philosophy: alert on SYMPTOMS users feel or money at risk (a double booking,
+# a refund stuck, payments unresolved, errors, slowness), plus the few causes
+# that need a human (dead letters, a stalled worker, checks not running).
+# Every rule has a summary, a description, and in docs/learning/phase-5.md the
+# first thing to check.
+#
+# Several worker replicas export the same series (one per instance), so
+# worker-side rules aggregate with max by (...) instead of matching one by one.
+# Tested with `promtool test rules monitoring/alerts_test.yml`.
+
+groups:
+  - name: seatlock-correctness
+    rules:
+      - alert: DoubleBookingDetected
+        # Wired to EVERY invariant gauge (verify.sql as live metrics), not only
+        # double_booking: any of them > 0 means money or seats are wrong NOW.
+        expr: max by (check) (seatlock_invariant_violations) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Invariant violated: {{ $labels.check }}"
+          description: >-
+            The invariant check "{{ $labels.check }}" finds {{ $value }} violating row(s).
+            This is a correctness incident (double booking, money taken without a seat,
+            or a refunded seat that is still booked). Run demo/verify.sql to see the rows.
+
+      - alert: InvariantChecksNotRunning
+        # "Could not check" must never look like "healthy": fire if a check has
+        # not succeeded for 2 minutes, or no worker reports checks at all.
+        expr: >-
+          (time() - max by (check) (seatlock_invariant_last_success_timestamp_seconds) > 120)
+          or absent(seatlock_invariant_last_success_timestamp_seconds)
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Invariant checks are not running ({{ $labels.check }})"
+          description: >-
+            No successful invariant check for over 2 minutes. Double bookings would go
+            unnoticed. Check the worker is up and seatlock_invariant_check_errors_total.
+
+      - alert: OutboxDeadLetters
+        expr: max(seatlock_outbox_rows{status="FAILED"}) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} outbox row(s) dead-lettered"
+          description: >-
+            An outbox row (a refund or a Redis lock release) failed OUTBOX_MAX_ATTEMPTS times
+            and is no longer retried. A refund may be owed. Inspect last_error, fix the cause,
+            then `make outbox-retry ID=<id>`.
+
+      - alert: PaymentsStuckPending
+        expr: max(seatlock_payments_pending_oldest_age_seconds) > 900
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "A payment has been PENDING for {{ $value | humanizeDuration }}"
+          description: >-
+            The oldest PENDING payment is older than 15 minutes, although the reconciler
+            resolves them after RECONCILE_AFTER (2m). Money may have been taken with no
+            seat and no refund. Check the payment_reconciler job and the gateway.
+
+  - name: seatlock-worker
+    rules:
+      - alert: WorkerJobStalled
+        # One rule for every job: compare "time since the last success" with
+        # 5 x THAT job's configured interval (exported by the worker itself).
+        # The label is worker_job, not job: Prometheus owns "job".
+        expr: >-
+          (time() - max by (worker_job) (seatlock_worker_last_success_timestamp_seconds))
+          > on (worker_job) (5 * max by (worker_job) (seatlock_worker_job_interval_seconds))
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Worker job {{ $labels.worker_job }} has not succeeded for 5 intervals"
+          description: >-
+            The {{ $labels.worker_job }} job has not completed a successful run for more than
+            5 times its interval. Its work (reconciling, refunds, expiring holds) is piling up.
+            Check the worker logs for "job run failed".
+
+  - name: seatlock-api
+    rules:
+      - alert: HighErrorRate
+        expr: >-
+          sum(rate(seatlock_http_requests_total{status=~"5.."}[5m]))
+          / sum(rate(seatlock_http_requests_total[5m])) > 0.01
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value | humanizePercentage }} of API requests fail with 5xx"
+          description: >-
+            More than 1% of requests return 5xx over 5 minutes. Look at the RPS by route and
+            status panel: 503 LOCK_UNAVAILABLE (Redis), 503 SERVICE_BUSY (database),
+            504 PAYMENT_PENDING (gateway) or 500 INTERNAL_ERROR (a bug: check the logs).
+
+      - alert: RedisLockUnavailable
+        # The FAIL-CLOSED signal: new holds are being refused because Redis
+        # cannot be asked. Confirms keep working (Option B).
+        expr: sum(rate(seatlock_holds_total{outcome="lock_unavailable"}[1m])) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "New holds are failing closed: Redis seat lock unavailable"
+          description: >-
+            Hold requests get 503 LOCK_UNAVAILABLE because Redis cannot be reached. Nobody
+            can start a booking; existing holds can still be paid. Check the redis service
+            and seatlock_redis_lock_ops_total{result="error"}.
+
+      - alert: SlowHolds
+        expr: >-
+          histogram_quantile(0.95,
+            sum by (le) (rate(seatlock_http_request_duration_seconds_bucket{route="/v1/holds",method="POST"}[5m])))
+          > 0.25
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "p95 of POST /v1/holds is {{ $value | humanizeDuration }}"
+          description: >-
+            5% of hold requests take longer than 250ms. Holding is the hot path of a sale.
+            Check the DB pool acquire wait and Redis lock latency panels.
+
+      - alert: DBPoolSaturated
+        # Seconds spent WAITING for a pool connection, per second. Above 0.1
+        # (100ms of waiting every second, summed over requests) the pool is
+        # too small for the load, and the waits eat into query timeouts.
+        expr: sum(rate(seatlock_db_pool_acquire_wait_seconds_total[5m])) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Requests are waiting for database connections"
+          description: >-
+            Time spent waiting to acquire a pooled connection is growing fast. Requests may
+            start failing with 503 SERVICE_BUSY. Consider DB_MAX_CONNS, or find slow queries.

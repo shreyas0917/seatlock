@@ -1,0 +1,13 @@
+# Grafana dashboard provisioning: load every dashboard JSON from
+# /var/lib/grafana/dashboards (mounted from monitoring/grafana/dashboards).
+# The JSON in the repo is the source of truth; UI edits are not saved.
+apiVersion: 1
+
+providers:
+  - name: seatlock
+    folder: SeatLock
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards

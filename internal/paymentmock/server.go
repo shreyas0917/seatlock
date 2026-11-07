@@ -24,6 +24,9 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 // Behaviours a charge can be forced into, via the X-Mock-Behavior header or
@@ -150,6 +153,7 @@ func New(opts Options) *Server {
 	s.mux.HandleFunc("POST /debug/next-behavior", s.queueBehavior)
 	s.mux.HandleFunc("POST /debug/reset", s.reset)
 	s.mux.HandleFunc("GET /debug/stats", s.stats)
+	s.mux.Handle("GET /metrics", s.metricsHandler())
 	s.mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
@@ -417,6 +421,37 @@ func (s *Server) Stats() Stats {
 		st.ChargeRequests[key] = n
 	}
 	return st
+}
+
+// metricsHandler exposes the mock's counters to Prometheus (GaugeFuncs read
+// the in-memory stats at scrape time; gauges, not counters, because
+// /debug/reset sets them back to 0). The dashboard shows them next to
+// SeatLock's own gateway metrics, so "SeatLock thinks" and "the gateway saw"
+// can be compared.
+func (s *Server) metricsHandler() http.Handler {
+	reg := prometheus.NewRegistry()
+	for name, help := range map[string]string{
+		"seatlock_mock_gateway_charges":     "Charges recorded by the mock gateway (declined included).",
+		"seatlock_mock_gateway_money_taken": "Charges that took money (succeeded or later refunded).",
+		"seatlock_mock_gateway_refunds":     "Refunds paid by the mock gateway.",
+		"seatlock_mock_gateway_voids":       "Keys voided at the mock gateway.",
+	} {
+		name := name
+		reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{Name: name, Help: help}, func() float64 {
+			st := s.Stats()
+			switch name {
+			case "seatlock_mock_gateway_charges":
+				return float64(st.TotalCharges)
+			case "seatlock_mock_gateway_money_taken":
+				return float64(st.MoneyTaken)
+			case "seatlock_mock_gateway_refunds":
+				return float64(st.TotalRefunds)
+			default:
+				return float64(st.TotalVoids)
+			}
+		}))
+	}
+	return promhttp.HandlerFor(reg, promhttp.HandlerOpts{})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

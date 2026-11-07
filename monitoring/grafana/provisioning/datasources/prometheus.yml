@@ -1,0 +1,15 @@
+# Grafana datasource provisioning: the Prometheus datasource, with a FIXED
+# uid ("prometheus") that every dashboard panel refers to. Provisioned from
+# this file on startup, so no manual setup is needed.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 5s   # matches the scrape interval
