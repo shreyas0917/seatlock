@@ -36,6 +36,11 @@ var (
 	// Mapped to 503 SERVICE_BUSY (see internal/httpapi/errors.go for why).
 	ErrBusy = errors.New("service busy")
 
+	// ErrLockUnavailable: Redis (the seat lock) could not be reached or did not
+	// answer in time. This is NOT "the seat is free": when we cannot ask the
+	// lock, we refuse the hold (fail closed). Mapped to 503 LOCK_UNAVAILABLE.
+	ErrLockUnavailable = errors.New("seat lock unavailable")
+
 	// ErrSeatAlreadyBooked: someone else already booked this seat. Produced
 	// when PostgreSQL rejects the insert with a unique-constraint violation
 	// (error code 23505) on bookings_show_seat_unique.

@@ -12,6 +12,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Config holds every setting the API needs.
@@ -33,6 +34,22 @@ type Config struct {
 	// DBMinConns connections are kept open even when idle, so the first
 	// requests after a quiet period do not all pay the connection handshake.
 	DBMinConns int32
+
+	// RedisAddr is host:port of Redis, used for the fast seat lock.
+	RedisAddr string
+	// Redis timeouts are deliberately SHORT (200ms). Redis answers in well
+	// under a millisecond when healthy; if it does not answer quickly it is
+	// down or overloaded, and we want to fail closed fast (503) rather than
+	// make every hold request hang.
+	RedisDialTimeout  time.Duration
+	RedisReadTimeout  time.Duration
+	RedisWriteTimeout time.Duration
+
+	// HoldTTL is how long a seat hold lasts in PostgreSQL (default 5 minutes).
+	HoldTTL time.Duration
+	// RedisLockExtra is added to HoldTTL for the Redis lock's lifetime, so the
+	// Redis lock always outlives the database hold (see internal/lock).
+	RedisLockExtra time.Duration
 }
 
 // Load builds a Config from environment variables, using a sensible default
@@ -68,7 +85,43 @@ func Load() (Config, error) {
 			cfg.DBMinConns, cfg.DBMaxConns)
 	}
 
+	cfg.RedisAddr = getEnv("REDIS_ADDR", "localhost:6379")
+	durations := []struct {
+		key      string
+		fallback time.Duration
+		dst      *time.Duration
+	}{
+		{"REDIS_DIAL_TIMEOUT", 200 * time.Millisecond, &cfg.RedisDialTimeout},
+		{"REDIS_READ_TIMEOUT", 200 * time.Millisecond, &cfg.RedisReadTimeout},
+		{"REDIS_WRITE_TIMEOUT", 200 * time.Millisecond, &cfg.RedisWriteTimeout},
+		{"HOLD_TTL", 300 * time.Second, &cfg.HoldTTL},
+		{"REDIS_LOCK_EXTRA", 10 * time.Second, &cfg.RedisLockExtra},
+	}
+	for _, d := range durations {
+		value, err := getDuration(d.key, d.fallback)
+		if err != nil {
+			return Config{}, err
+		}
+		if value <= 0 {
+			return Config{}, fmt.Errorf("invalid %s: must be greater than zero", d.key)
+		}
+		*d.dst = value
+	}
+
 	return cfg, nil
+}
+
+// getDuration reads a Go duration such as "300s", "200ms" or "5m".
+func getDuration(key string, fallback time.Duration) (time.Duration, error) {
+	raw := getEnv(key, "")
+	if raw == "" {
+		return fallback, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("invalid %s %q (use a duration like 300s or 200ms): %w", key, raw, err)
+	}
+	return d, nil
 }
 
 // getEnv returns the value of an environment variable, or fallback if it is
