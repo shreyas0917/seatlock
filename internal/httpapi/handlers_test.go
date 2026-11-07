@@ -22,11 +22,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/shreyas0917/seatlock/internal/booking"
 	"github.com/shreyas0917/seatlock/internal/idempotency"
+	"github.com/shreyas0917/seatlock/internal/metrics"
 )
 
 // stubRepository knows show 1 with seat 7. The *Err fields, when set, are
@@ -626,4 +628,52 @@ func TestConfirm_410IncludesRefundState(t *testing.T) {
 
 	assert.Equal(t, http.StatusGone, rec.Code)
 	assert.Contains(t, rec.Body.String(), `"payment":"REFUNDED"`)
+}
+
+// ---------- HTTP metrics (Phase 5) ----------
+
+func newMetricsRouter(t *testing.T) (http.Handler, *metrics.Metrics) {
+	t.Helper()
+	m := metrics.NewAPI()
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	svc := booking.NewService(&stubRepository{}, stubLocker{}, stubGateway{}, time.Minute)
+	return NewRouter(svc, newFakeIdem(), stubPinger{}, stubPinger{}, logger, WithMetrics(m)), m
+}
+
+// The route label is the chi PATTERN, never the raw path (cardinality).
+func TestMetrics_RouteLabelIsThePattern(t *testing.T) {
+	router, m := newMetricsRouter(t)
+
+	send(t, router, http.MethodDelete, "/v1/holds/123", "alice", "")
+	send(t, router, http.MethodDelete, "/v1/holds/456", "alice", "")
+	send(t, router, http.MethodGet, "/no/such/path/789", "", "")
+	send(t, router, "FOOBAR", "/v1/shows", "", "")
+
+	assert.Equal(t, 2.0, testutil.ToFloat64(m.HTTPRequests.WithLabelValues("/v1/holds/{holdID}", "DELETE", "200")))
+	assert.Equal(t, 1.0, testutil.ToFloat64(m.HTTPRequests.WithLabelValues("unmatched", "GET", "404")))
+	families, err := m.Registry.Gather()
+	require.NoError(t, err)
+	methods := map[string]bool{}
+	for _, f := range families {
+		for _, metric := range f.GetMetric() {
+			for _, l := range metric.GetLabel() {
+				assert.NotContains(t, l.GetValue(), "123", "raw ids must never become label values")
+				assert.NotContains(t, l.GetValue(), "789")
+				if l.GetName() == "method" {
+					methods[l.GetValue()] = true
+				}
+			}
+		}
+	}
+	assert.True(t, methods["OTHER"], "unknown methods are folded into OTHER")
+	assert.False(t, methods["FOOBAR"], "a client-chosen method never becomes a label value")
+}
+
+// The public router does not serve /metrics (it lives on the internal port).
+func TestMetrics_NotOnThePublicRouter(t *testing.T) {
+	router, _ := newMetricsRouter(t)
+
+	rec := send(t, router, http.MethodGet, "/metrics", "", "")
+
+	assert.Equal(t, http.StatusNotFound, rec.Code)
 }

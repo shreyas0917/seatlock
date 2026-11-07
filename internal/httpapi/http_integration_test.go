@@ -36,6 +36,7 @@ import (
 	"github.com/shreyas0917/seatlock/internal/db"
 	"github.com/shreyas0917/seatlock/internal/idempotency"
 	"github.com/shreyas0917/seatlock/internal/lock"
+	"github.com/shreyas0917/seatlock/internal/metrics"
 	"github.com/shreyas0917/seatlock/internal/payment"
 	"github.com/shreyas0917/seatlock/internal/paymentmock"
 )
@@ -183,4 +184,65 @@ func TestHTTP_ParallelHoldBurstHasNo500s(t *testing.T) {
 	confirm := post("/v1/bookings", fmt.Sprintf("burst-user-%d", winner), fmt.Sprintf(`{"hold_id": %d}`, hold.HoldID))
 	require.NoError(t, confirm.err)
 	assert.Equal(t, http.StatusCreated, confirm.status, confirm.body)
+}
+
+// TestMetricsEndpoint_ExposesExpectedNames: the internal metrics handler
+// (what cmd/api serves on METRICS_ADDR) exposes HTTP and pool metrics after
+// real traffic, and the public router does not serve /metrics at all.
+func TestMetricsEndpoint_ExposesExpectedNames(t *testing.T) {
+	ctx := context.Background()
+	dbURL := os.Getenv("TEST_DATABASE_URL")
+	if dbURL == "" {
+		dbURL = defaultTestDatabaseURL
+	}
+	require.NoError(t, db.MigrateUp(dbURL))
+	defaults, err := config.Load()
+	require.NoError(t, err)
+	pool, err := db.NewPool(ctx, dbURL, defaults.DBMaxConns, defaults.DBMinConns)
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	redisAddr := os.Getenv("TEST_REDIS_ADDR")
+	if redisAddr == "" {
+		redisAddr = "localhost:6379"
+	}
+	rdb := lock.NewClient(lock.Options{Addr: redisAddr, DB: 1, DialTimeout: testRedisTimeout, ReadTimeout: testRedisTimeout, WriteTimeout: testRedisTimeout})
+	t.Cleanup(func() { _ = rdb.Close() })
+
+	m := metrics.NewAPI()
+	m.RegisterDBPool(pool)
+	m.RegisterRedisPool(rdb)
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	locker := lock.NewRedisLocker(rdb, defaults.HoldTTL, defaults.RedisLockExtra)
+	svc := booking.NewService(booking.NewPostgresRepository(pool, testDBQueryTimeout), locker, nil, defaults.HoldTTL)
+	public := httptest.NewServer(NewRouter(svc, nil, pool, locker, logger, WithMetrics(m)))
+	t.Cleanup(public.Close)
+	internal := httptest.NewServer(m.Handler())
+	t.Cleanup(internal.Close)
+
+	resp, err := http.Get(public.URL + "/v1/shows")
+	require.NoError(t, err)
+	resp.Body.Close()
+	resp, err = http.Get(public.URL + "/metrics")
+	require.NoError(t, err)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "the public port must not serve /metrics")
+
+	resp, err = http.Get(internal.URL)
+	require.NoError(t, err)
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	require.NoError(t, err)
+	for _, name := range []string{
+		`seatlock_http_requests_total{method="GET",route="/v1/shows",status="200"}`,
+		"seatlock_http_request_duration_seconds_bucket",
+		"seatlock_http_in_flight_requests",
+		`seatlock_db_pool_connections{state="total"}`,
+		"seatlock_db_pool_acquire_wait_seconds_total",
+		`seatlock_redis_pool_connections{state="idle"}`,
+		"seatlock_redis_pool_hits_total",
+		"go_goroutines",
+		"process_resident_memory_bytes",
+	} {
+		assert.Contains(t, string(body), name)
+	}
 }

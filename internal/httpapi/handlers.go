@@ -20,6 +20,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/shreyas0917/seatlock/internal/booking"
+	"github.com/shreyas0917/seatlock/internal/metrics"
 )
 
 // BookingService is what the handlers need from the booking layer.
@@ -53,6 +54,7 @@ type handlers struct {
 	postgres Pinger
 	redis    Pinger
 	logger   *slog.Logger
+	metrics  *metrics.Metrics // nil = metrics disabled
 }
 
 // healthz godoc

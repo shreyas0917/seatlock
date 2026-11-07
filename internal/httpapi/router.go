@@ -18,14 +18,25 @@ import (
 // NewRouter builds the HTTP handler for the whole API. idem stores
 // Idempotency-Keys for POST /v1/bookings; postgres and redis are only used by
 // /readyz to report each dependency's health.
-func NewRouter(svc BookingService, idem IdempotencyStore, postgres, redis Pinger, logger *slog.Logger) http.Handler {
-	h := &handlers{svc: svc, idem: idem, postgres: postgres, redis: redis, logger: logger}
+//
+// Options: WithMetrics(m) records HTTP metrics. Metrics are NOT served here:
+// /metrics lives on a separate internal port (see cmd/api), so this public
+// router answers /metrics with 404.
+func NewRouter(svc BookingService, idem IdempotencyStore, postgres, redis Pinger, logger *slog.Logger, opts ...RouterOption) http.Handler {
+	var o routerOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
+	h := &handlers{svc: svc, idem: idem, postgres: postgres, redis: redis, logger: logger, metrics: o.metrics}
 
 	r := chi.NewRouter()
 
 	// Middleware wraps every request. Order matters: RequestID runs first so
 	// the logger and the error handler can include the ID.
-	r.Use(middleware.RequestID)  // gives each request a unique ID
+	r.Use(middleware.RequestID) // gives each request a unique ID
+	if o.metrics != nil {
+		r.Use(requestMetrics(o.metrics)) // RED metrics per route pattern
+	}
 	r.Use(requestLogger(logger)) // one JSON log line per request
 	r.Use(middleware.Recoverer)  // a panic in a handler becomes a 500, not a crashed server
 

@@ -41,8 +41,16 @@ import (
 	"github.com/shreyas0917/seatlock/internal/httpapi"
 	"github.com/shreyas0917/seatlock/internal/idempotency"
 	"github.com/shreyas0917/seatlock/internal/lock"
+	"github.com/shreyas0917/seatlock/internal/metrics"
 	"github.com/shreyas0917/seatlock/internal/payment"
 )
+
+// newMetricsServer serves only GET /metrics for the given registry.
+func newMetricsServer(addr string, m *metrics.Metrics) *http.Server {
+	mux := http.NewServeMux()
+	mux.Handle("GET /metrics", m.Handler())
+	return &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+}
 
 // How long to wait for in-flight requests to finish during shutdown.
 const shutdownTimeout = 15 * time.Second
@@ -109,7 +117,29 @@ func run() error {
 	// Idempotency-Keys for POST /v1/bookings live in Postgres (not Redis), so
 	// duplicate protection keeps working while Redis is down.
 	idem := idempotency.NewStore(pool, cfg.IdempotencyLease, cfg.DBQueryTimeout)
-	router := httpapi.NewRouter(svc, idem, pool, locker, logger)
+	// Metrics: one private registry; pool statistics are read at scrape time.
+	m := metrics.NewAPI()
+	m.RegisterDBPool(pool)
+	m.RegisterRedisPool(redisClient)
+	router := httpapi.NewRouter(svc, idem, pool, locker, logger, httpapi.WithMetrics(m))
+
+	// /metrics is served on a SEPARATE internal port (METRICS_ADDR), never on
+	// the public API port: metrics reveal internals (traffic, error rates,
+	// pool sizes) that the internet should not see, and scraping must keep
+	// working even if the public port is overloaded or rate-limited. In
+	// Compose this port is not published to the host; only Prometheus, inside
+	// the Compose network, reaches it.
+	metricsAddr := cfg.MetricsAddr
+	if metricsAddr == "" {
+		metricsAddr = ":9091"
+	}
+	metricsServer := newMetricsServer(metricsAddr, m)
+	go func() {
+		logger.Info("metrics server listening", "addr", metricsAddr)
+		if err := metricsServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Error("metrics server stopped", "error", err.Error())
+		}
+	}()
 
 	server := &http.Server{
 		Addr:    cfg.HTTPAddr,
@@ -147,6 +177,7 @@ func run() error {
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		return err
 	}
+	_ = metricsServer.Shutdown(shutdownCtx) // after the API, so the last requests are still scraped
 
 	// After Shutdown, ListenAndServe returns http.ErrServerClosed: expected, not an error.
 	if err := <-serverErr; err != nil && !errors.Is(err, http.ErrServerClosed) {

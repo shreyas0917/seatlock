@@ -68,6 +68,11 @@ type Config struct {
 	// (two transactions + PaymentTimeout).
 	IdempotencyLease time.Duration
 
+	// MetricsAddr is where /metrics is served: a SEPARATE, internal port, not
+	// the public API port. Empty = the binary's default (api :9091, worker
+	// :9092).
+	MetricsAddr string
+
 	// PendingHoldMax: how long past its expiry a hold with an unresolved
 	// (PENDING) payment may keep blocking its seat. Used by the API and the
 	// worker alike (booking.Limits).
@@ -130,6 +135,7 @@ func Load() (Config, error) {
 
 	cfg.RedisAddr = getEnv("REDIS_ADDR", "localhost:6379")
 	cfg.PaymentURL = getEnv("PAYMENT_URL", "http://localhost:8095")
+	cfg.MetricsAddr = getEnv("METRICS_ADDR", "")
 	if cfg.RedisPoolSize, err = getInt32("REDIS_POOL_SIZE", 10); err != nil {
 		return Config{}, err
 	}
