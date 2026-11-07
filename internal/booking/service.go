@@ -43,6 +43,7 @@ type Repository interface {
 	BeginPayment(ctx context.Context, in ConfirmInput) (payment Payment, created bool, err error)
 	CompletePayment(ctx context.Context, paymentID int64, chargeID string) (CompleteResult, error)
 	MarkPaymentDeclined(ctx context.Context, paymentID int64) error
+	MarkPaymentAbandoned(ctx context.Context, paymentID int64) error
 	MarkRefunded(ctx context.Context, paymentID, outboxID int64) (Payment, error)
 	RecordOutboxFailure(ctx context.Context, outboxID int64, failure string) error
 }

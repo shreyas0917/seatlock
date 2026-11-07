@@ -29,6 +29,7 @@ import (
 //	succeeded, hold still valid   -> the booking (201)
 //	succeeded, hold expired/gone  -> refund, *HoldExpiredError with the refund state (410)
 //	declined                      -> ErrPaymentDeclined (402); the hold stays ACTIVE
+//	voided (key closed earlier)   -> ErrPaymentNotCompleted (504); payment ABANDONED, nothing charged
 //	no answer (timeout, error)    -> ErrPaymentPending (504); the payment stays PENDING
 //
 // The final guard against double booking is still the Phase 1 one: the
@@ -79,6 +80,17 @@ func (s *Service) ConfirmBooking(ctx context.Context, in ConfirmInput) (Booking,
 		// same Idempotency-Key re-sends the SAME charge_key and learns the
 		// real outcome. (Phase 4's worker reconciles abandoned PENDINGs.)
 		return Booking{}, fmt.Errorf("%w: payment %d: %w", ErrPaymentPending, payment.ID, err)
+	}
+
+	if charge.Status == ChargeVoided {
+		// The reconciler (cmd/worker) found no charge for this payment and
+		// closed its key at the gateway, so this late attempt was refused.
+		// We KNOW no money was taken. Mark it ABANDONED (the same method the
+		// reconciler uses); the next retry starts a NEW payment and key.
+		if err := s.repo.MarkPaymentAbandoned(ctx, payment.ID); err != nil {
+			return Booking{}, err
+		}
+		return Booking{}, ErrPaymentNotCompleted
 	}
 
 	if charge.Status == ChargeDeclined {

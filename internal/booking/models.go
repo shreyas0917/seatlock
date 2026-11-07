@@ -111,6 +111,7 @@ const (
 	PaymentDeclined      PaymentStatus = "DECLINED"       // no money taken
 	PaymentRefundPending PaymentStatus = "REFUND_PENDING" // money taken, refund owed
 	PaymentRefunded      PaymentStatus = "REFUNDED"       // money returned
+	PaymentAbandoned     PaymentStatus = "ABANDONED"      // key voided at the gateway; no money taken
 )
 
 // Payment is one attempt to charge the user for a hold.

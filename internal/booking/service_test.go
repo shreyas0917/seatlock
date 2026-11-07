@@ -215,6 +215,15 @@ func (f *fakeRepository) MarkPaymentDeclined(ctx context.Context, paymentID int6
 	return nil
 }
 
+func (f *fakeRepository) MarkPaymentAbandoned(ctx context.Context, paymentID int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	p := f.payments[paymentID]
+	p.Status = PaymentAbandoned
+	f.payments[paymentID] = p
+	return nil
+}
+
 func (f *fakeRepository) MarkRefunded(ctx context.Context, paymentID, outboxID int64) (Payment, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -304,6 +313,7 @@ type fakeGateway struct {
 	mu         sync.Mutex
 	chargeErr  error
 	decline    bool
+	voided     bool // every charge answers "voided"
 	refundErr  error
 	chargeKeys []string // every charge key received
 	refunds    int
@@ -316,10 +326,21 @@ func (g *fakeGateway) Charge(ctx context.Context, req ChargeRequest) (ChargeResu
 	if g.chargeErr != nil {
 		return ChargeResult{}, g.chargeErr
 	}
+	if g.voided {
+		return ChargeResult{Status: ChargeVoided}, nil
+	}
 	if g.decline {
 		return ChargeResult{ChargeID: "ch_" + req.IdempotencyKey, Status: ChargeDeclined}, nil
 	}
 	return ChargeResult{ChargeID: "ch_" + req.IdempotencyKey, Status: ChargeSucceeded}, nil
+}
+
+func (g *fakeGateway) Lookup(ctx context.Context, key string) (ChargeResult, error) {
+	return ChargeResult{}, ErrChargeNotFound
+}
+
+func (g *fakeGateway) Void(ctx context.Context, key string) (ChargeResult, error) {
+	return ChargeResult{Status: ChargeVoided}, nil
 }
 
 func (g *fakeGateway) Refund(ctx context.Context, req RefundRequest) (RefundResult, error) {

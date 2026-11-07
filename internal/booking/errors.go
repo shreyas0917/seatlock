@@ -70,6 +70,13 @@ var (
 	// same Idempotency-Key finds out what happened. Mapped to 504 PAYMENT_PENDING.
 	ErrPaymentPending = errors.New("payment outcome unknown")
 
+	// ErrPaymentNotCompleted: the charge was REFUSED because its key had been
+	// voided by the reconciler (the old attempt was abandoned). We KNOW no
+	// money was taken; the payment is now ABANDONED, and a retry starts a new
+	// payment. Mapped to 504 PAYMENT_NOT_COMPLETED (not stored, so a retry
+	// with the same Idempotency-Key runs again).
+	ErrPaymentNotCompleted = errors.New("payment not completed; no money was taken")
+
 	// ErrPaymentInProgress: the hold has a payment in flight, so it cannot
 	// be cancelled right now. Mapped to 409 PAYMENT_IN_PROGRESS.
 	ErrPaymentInProgress = errors.New("payment in progress for this hold")

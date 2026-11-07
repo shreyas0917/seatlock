@@ -110,3 +110,37 @@ func TestRefund(t *testing.T) {
 	assert.Equal(t, r1.RefundID, r2.RefundID, "a repeated refund key is not paid twice")
 	assert.Equal(t, 1, mock.Stats().TotalRefunds)
 }
+
+func TestLookup(t *testing.T) {
+	_, srv := newMock(t)
+	c := NewClient(srv.URL, time.Second)
+
+	_, err := c.Lookup(context.Background(), "pay-1")
+	assert.ErrorIs(t, err, booking.ErrChargeNotFound, "a 404 is a definite 'no such charge'")
+
+	_, err = c.Charge(context.Background(), booking.ChargeRequest{IdempotencyKey: "pay-1", AmountPaise: 25000})
+	require.NoError(t, err)
+	res, err := c.Lookup(context.Background(), "pay-1")
+	require.NoError(t, err)
+	assert.Equal(t, booking.ChargeSucceeded, res.Status)
+}
+
+func TestVoid_ThenChargeIsRefused(t *testing.T) {
+	mock, srv := newMock(t)
+	c := NewClient(srv.URL, time.Second)
+
+	res, err := c.Void(context.Background(), "pay-1")
+	require.NoError(t, err)
+	assert.Equal(t, booking.ChargeVoided, res.Status)
+
+	res, err = c.Charge(context.Background(), booking.ChargeRequest{IdempotencyKey: "pay-1", AmountPaise: 25000})
+	require.NoError(t, err, "voided is a definite answer")
+	assert.Equal(t, booking.ChargeVoided, res.Status)
+	assert.Equal(t, 0, mock.Stats().MoneyTaken)
+}
+
+func TestLookup_GatewayDown_IsNoAnswer(t *testing.T) {
+	_, err := NewClient("http://127.0.0.1:1", time.Second).Lookup(context.Background(), "pay-1")
+	assert.ErrorIs(t, err, booking.ErrGatewayNoAnswer)
+	assert.NotErrorIs(t, err, booking.ErrChargeNotFound, "down is NOT the same as not found")
+}

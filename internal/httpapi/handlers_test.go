@@ -96,6 +96,8 @@ func (s *stubRepository) CompletePayment(ctx context.Context, paymentID int64, c
 
 func (s *stubRepository) MarkPaymentDeclined(ctx context.Context, paymentID int64) error { return nil }
 
+func (s *stubRepository) MarkPaymentAbandoned(ctx context.Context, paymentID int64) error { return nil }
+
 func (s *stubRepository) MarkRefunded(ctx context.Context, paymentID, outboxID int64) (booking.Payment, error) {
 	return booking.Payment{ID: paymentID, Status: booking.PaymentRefunded}, nil
 }
@@ -136,16 +138,28 @@ func (l stubLocker) Release(ctx context.Context, showID, seatID int64, owner str
 type stubGateway struct {
 	chargeErr error
 	decline   bool
+	voided    bool
 }
 
 func (g stubGateway) Charge(ctx context.Context, req booking.ChargeRequest) (booking.ChargeResult, error) {
 	if g.chargeErr != nil {
 		return booking.ChargeResult{}, g.chargeErr
 	}
+	if g.voided {
+		return booking.ChargeResult{Status: booking.ChargeVoided}, nil
+	}
 	if g.decline {
 		return booking.ChargeResult{ChargeID: "ch_1", Status: booking.ChargeDeclined}, nil
 	}
 	return booking.ChargeResult{ChargeID: "ch_1", Status: booking.ChargeSucceeded}, nil
+}
+
+func (g stubGateway) Lookup(ctx context.Context, key string) (booking.ChargeResult, error) {
+	return booking.ChargeResult{}, booking.ErrChargeNotFound
+}
+
+func (g stubGateway) Void(ctx context.Context, key string) (booking.ChargeResult, error) {
+	return booking.ChargeResult{Status: booking.ChargeVoided}, nil
 }
 
 func (g stubGateway) Refund(ctx context.Context, req booking.RefundRequest) (booking.RefundResult, error) {
@@ -504,6 +518,7 @@ func TestConfirmBooking_PaymentErrors(t *testing.T) {
 	}{
 		{"declined", stubGateway{decline: true}, http.StatusPaymentRequired, "PAYMENT_DECLINED"},
 		{"no answer", stubGateway{chargeErr: fmt.Errorf("charge: %w", booking.ErrGatewayNoAnswer)}, http.StatusGatewayTimeout, "PAYMENT_PENDING"},
+		{"voided key", stubGateway{voided: true}, http.StatusGatewayTimeout, "PAYMENT_NOT_COMPLETED"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

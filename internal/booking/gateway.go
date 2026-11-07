@@ -22,6 +22,10 @@ type ChargeStatus string
 const (
 	ChargeSucceeded ChargeStatus = "succeeded" // the money was taken
 	ChargeDeclined  ChargeStatus = "declined"  // no money was taken
+	// ChargeVoided: the key was closed at the gateway (by the reconciler)
+	// before any charge happened. No money was taken, and none ever will be
+	// for this key.
+	ChargeVoided ChargeStatus = "voided"
 )
 
 // ChargeRequest asks the gateway to take money.
@@ -60,12 +64,22 @@ type RefundResult struct {
 // SAME idempotency key (the gateway then returns what really happened).
 var ErrGatewayNoAnswer = errors.New("payment gateway gave no answer")
 
+// ErrChargeNotFound is a DEFINITE answer from Lookup: the gateway has no
+// charge for this key (the request probably never reached it).
+var ErrChargeNotFound = errors.New("no charge for this key at the gateway")
+
 // PaymentGateway charges and refunds money.
 //
-// Contract: Charge returns a ChargeResult (succeeded or declined) ONLY when
-// the gateway gave a definite answer; anything else is an error wrapping
-// ErrGatewayNoAnswer. Refund works the same way.
+// Contract: Charge, Lookup and Void return a ChargeResult (succeeded,
+// declined or voided) ONLY when the gateway gave a definite answer; anything
+// else is an error wrapping ErrGatewayNoAnswer. Lookup returns
+// ErrChargeNotFound when the gateway definitely has no charge for the key.
 type PaymentGateway interface {
 	Charge(ctx context.Context, req ChargeRequest) (ChargeResult, error)
 	Refund(ctx context.Context, req RefundRequest) (RefundResult, error)
+	// Lookup asks what happened to a charge key (GET /charges/{key}).
+	Lookup(ctx context.Context, key string) (ChargeResult, error)
+	// Void closes an unused key so no later charge with it can take money.
+	// If a charge already exists, its real result is returned instead.
+	Void(ctx context.Context, key string) (ChargeResult, error)
 }

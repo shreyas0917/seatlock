@@ -323,6 +323,23 @@ func (r *PostgresRepository) MarkPaymentDeclined(ctx context.Context, paymentID 
 	return nil
 }
 
+// MarkPaymentAbandoned records that a PENDING payment's key was voided at the
+// gateway: no money was taken, and none can be for that key. Like DECLINED,
+// ABANDONED is outside payments_one_live_per_hold, so the user may pay again
+// with a NEW payment and a new charge_key.
+func (r *PostgresRepository) MarkPaymentAbandoned(ctx context.Context, paymentID int64) error {
+	ctx, cancel := context.WithTimeout(ctx, r.queryTimeout)
+	defer cancel()
+
+	_, err := r.pool.Exec(ctx, `
+		UPDATE payments SET status = 'ABANDONED', updated_at = NOW()
+		WHERE id = $1 AND status = 'PENDING'`, paymentID)
+	if err != nil {
+		return dbError(err, "mark payment %d abandoned", paymentID)
+	}
+	return nil
+}
+
 // MarkRefunded records a successful refund: payment REFUNDED and its outbox
 // row DONE, together.
 func (r *PostgresRepository) MarkRefunded(ctx context.Context, paymentID, outboxID int64) (Payment, error) {

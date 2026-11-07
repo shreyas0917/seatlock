@@ -129,3 +129,27 @@ func TestConfirm_BeginPaymentErrorsPassThrough(t *testing.T) {
 	assert.ErrorIs(t, err, ErrHoldNotFound)
 	assert.Empty(t, gateway.chargeKeys, "no charge without a valid hold")
 }
+
+// TestConfirm_VoidedKey_AbandonsAndRetryStartsNewPayment: the reconciler
+// voided this payment's key, so the gateway refuses the late charge. We know
+// nothing was taken: ABANDONED + ErrPaymentNotCompleted. The next attempt
+// gets a NEW payment and a NEW charge key.
+func TestConfirm_VoidedKey_AbandonsAndRetryStartsNewPayment(t *testing.T) {
+	svc, repo, _, gateway := newTestServiceWithGateway()
+	gateway.voided = true
+	h := holdFor(t, svc)
+
+	_, err := svc.ConfirmBooking(context.Background(), ConfirmInput{UserID: "alice", HoldID: h.ID})
+
+	assert.ErrorIs(t, err, ErrPaymentNotCompleted)
+	for _, p := range repo.payments {
+		assert.Equal(t, PaymentAbandoned, p.Status)
+	}
+
+	gateway.voided = false
+	b, err := svc.ConfirmBooking(context.Background(), ConfirmInput{UserID: "alice", HoldID: h.ID})
+	require.NoError(t, err)
+	assert.Equal(t, h.ID, b.HoldID)
+	require.Len(t, gateway.chargeKeys, 2)
+	assert.NotEqual(t, gateway.chargeKeys[0], gateway.chargeKeys[1], "a voided key is never reused")
+}

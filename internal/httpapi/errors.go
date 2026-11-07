@@ -75,6 +75,10 @@ func mapError(err error) httpError {
 		// 402 Payment Required: the card was declined, nothing was charged,
 		// and the hold is still valid. Retry with a NEW Idempotency-Key.
 		return httpError{http.StatusPaymentRequired, "PAYMENT_DECLINED", "the payment was declined; no money was taken"}
+	case errors.Is(err, booking.ErrPaymentNotCompleted):
+		// Still 504 so clients retry the same way, but a DIFFERENT code than
+		// PAYMENT_PENDING: here the outcome is known, nothing was charged.
+		return httpError{http.StatusGatewayTimeout, "PAYMENT_NOT_COMPLETED", "No money was taken. Please retry."}
 	case errors.Is(err, booking.ErrPaymentPending):
 		// Checked BEFORE ErrBusy: a Tx B timeout wraps both, and the honest
 		// answer is "payment outcome unknown". 504 Gateway Timeout: retry
