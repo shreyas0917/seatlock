@@ -27,7 +27,8 @@ import (
 //   - CreateHold returns ErrSeatHeld / ErrSeatAlreadyBooked when the seat is
 //     not free, and created=false with the existing hold for a same-user retry;
 //   - ConfirmHold and ReleaseHold return ErrHoldNotFound, ErrHoldAlreadyUsed
-//     or ErrHoldExpired when the hold cannot be used.
+//     or ErrHoldExpired when the hold cannot be used; ReleaseHold returns
+//     ErrPaymentInProgress while the hold has a PENDING payment.
 type Repository interface {
 	ListShows(ctx context.Context) ([]Show, error)
 	GetShow(ctx context.Context, showID int64) (Show, error)
@@ -36,7 +37,8 @@ type Repository interface {
 	GetBooking(ctx context.Context, bookingID int64) (Booking, error)
 	CreateHold(ctx context.Context, in HoldSeatInput, ttl time.Duration) (hold Hold, created bool, err error)
 	ConfirmHold(ctx context.Context, in ConfirmInput) (Booking, error)
-	ReleaseHold(ctx context.Context, userID string, holdID int64) (Hold, error)
+	ReleaseHold(ctx context.Context, userID string, holdID int64) (hold Hold, outboxID int64, err error)
+	MarkOutboxDone(ctx context.Context, outboxID int64) error
 }
 
 // Service applies SeatLock's business rules.

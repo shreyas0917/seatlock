@@ -145,7 +145,7 @@ func TestConfirmHold_Rejections(t *testing.T) {
 		{"expired hold", func(t *testing.T, f testFixture, id int64) { expireHold(t, f, id) },
 			"alice", func(id int64) int64 { return id }, ErrHoldExpired},
 		{"released hold", func(t *testing.T, f testFixture, id int64) {
-			_, err := f.repo.ReleaseHold(context.Background(), "alice", id)
+			_, _, err := f.repo.ReleaseHold(context.Background(), "alice", id)
 			require.NoError(t, err)
 		}, "alice", func(id int64) int64 { return id }, ErrHoldExpired},
 		{"already consumed hold", func(t *testing.T, f testFixture, id int64) {
@@ -177,18 +177,20 @@ func TestReleaseHold(t *testing.T) {
 	h, _, err := f.repo.CreateHold(ctx, HoldSeatInput{UserID: "alice", ShowID: f.showID, SeatID: f.seatIDs[0]}, testHoldTTL)
 	require.NoError(t, err)
 
-	_, err = f.repo.ReleaseHold(ctx, "mallory", h.ID)
+	_, _, err = f.repo.ReleaseHold(ctx, "mallory", h.ID)
 	assert.ErrorIs(t, err, ErrHoldNotFound, "another user cannot cancel the hold")
 
-	released, err := f.repo.ReleaseHold(ctx, "alice", h.ID)
+	released, outboxID, err := f.repo.ReleaseHold(ctx, "alice", h.ID)
 	require.NoError(t, err)
 	assert.Equal(t, HoldReleased, released.Status)
+	assert.NotZero(t, outboxID, "a RELEASE_LOCK outbox row is written with the release")
 
-	again, err := f.repo.ReleaseHold(ctx, "alice", h.ID)
+	again, againOutbox, err := f.repo.ReleaseHold(ctx, "alice", h.ID)
 	require.NoError(t, err, "cancelling twice is safe")
 	assert.Equal(t, HoldReleased, again.Status)
+	assert.Zero(t, againOutbox, "a repeated cancel writes no second outbox row")
 
-	_, err = f.repo.ReleaseHold(ctx, "alice", 99999)
+	_, _, err = f.repo.ReleaseHold(ctx, "alice", 99999)
 	assert.ErrorIs(t, err, ErrHoldNotFound)
 
 	// After release, someone else can hold the seat.
@@ -208,9 +210,9 @@ func TestReleaseHold_ConsumedAndExpired(t *testing.T) {
 	require.NoError(t, err)
 	expireHold(t, f, expired.ID)
 
-	_, err = f.repo.ReleaseHold(ctx, "alice", consumed.ID)
+	_, _, err = f.repo.ReleaseHold(ctx, "alice", consumed.ID)
 	assert.ErrorIs(t, err, ErrHoldAlreadyUsed)
-	_, err = f.repo.ReleaseHold(ctx, "alice", expired.ID)
+	_, _, err = f.repo.ReleaseHold(ctx, "alice", expired.ID)
 	assert.ErrorIs(t, err, ErrHoldExpired)
 }
 

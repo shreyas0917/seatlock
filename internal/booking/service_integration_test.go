@@ -80,7 +80,7 @@ func setup(t *testing.T) env {
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
 
-	_, err = pool.Exec(ctx, `TRUNCATE bookings, holds, seats, shows RESTART IDENTITY CASCADE`)
+	_, err = pool.Exec(ctx, `TRUNCATE bookings, payments, holds, seats, shows, outbox, idempotency_keys RESTART IDENTITY CASCADE`)
 	require.NoError(t, err)
 	var showID int64
 	require.NoError(t, pool.QueryRow(ctx, `

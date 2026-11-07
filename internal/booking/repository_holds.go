@@ -28,6 +28,7 @@ package booking
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -224,46 +225,76 @@ func (r *PostgresRepository) ConfirmHold(ctx context.Context, in ConfirmInput) (
 	return b, nil
 }
 
-// ReleaseHold cancels the user's ACTIVE hold (status -> RELEASED).
+// ReleaseHold cancels the user's ACTIVE hold (status -> RELEASED), in one
+// transaction that also writes an outbox RELEASE_LOCK row, so deleting the
+// Redis lock is never forgotten even if Redis is down right now (Phase 4's
+// worker drains the outbox). It returns the hold and that outbox row's id.
 //
-// Cancelling an already-released hold returns it again (safe to retry).
-// A hold that is missing or belongs to someone else -> ErrHoldNotFound,
-// already confirmed -> ErrHoldAlreadyUsed, expired -> ErrHoldExpired.
-func (r *PostgresRepository) ReleaseHold(ctx context.Context, userID string, holdID int64) (Hold, error) {
+// Cancelling an already-released hold returns it again (safe to retry,
+// outbox id 0). A hold that is missing or belongs to someone else ->
+// ErrHoldNotFound, already confirmed -> ErrHoldAlreadyUsed, expired ->
+// ErrHoldExpired, a payment in flight -> ErrPaymentInProgress.
+func (r *PostgresRepository) ReleaseHold(ctx context.Context, userID string, holdID int64) (Hold, int64, error) {
 	ctx, cancel := context.WithTimeout(ctx, r.queryTimeout)
 	defer cancel()
 
-	// One atomic UPDATE: it only matches if the hold is ACTIVE, unexpired and
-	// owned by this user, so no transaction or FOR UPDATE is needed.
-	hold, err := scanHold(r.pool.QueryRow(ctx, `
-		UPDATE holds SET status = 'RELEASED', updated_at = NOW()
-		WHERE id = $1 AND user_id = $2
-		  AND status = 'ACTIVE' AND expires_at > NOW()
-		RETURNING `+holdColumns, holdID, userID))
-	if err == nil {
-		return hold, nil
-	}
-	if !errors.Is(err, pgx.ErrNoRows) {
-		return Hold{}, dbError(err, "release hold %d", holdID)
-	}
-
-	// Nothing was updated. Read the hold to explain why.
-	hold, err = scanHold(r.pool.QueryRow(ctx, `
-		SELECT `+holdColumns+` FROM holds WHERE id = $1`, holdID))
-	if errors.Is(err, pgx.ErrNoRows) {
-		return Hold{}, ErrHoldNotFound
-	}
+	tx, err := r.pool.Begin(ctx)
 	if err != nil {
-		return Hold{}, dbError(err, "get hold %d", holdID)
+		return Hold{}, 0, dbError(err, "begin release hold")
+	}
+	defer tx.Rollback(ctx)
+
+	h, err := lockHold(ctx, tx, holdID)
+	if err != nil {
+		return Hold{}, 0, err
+	}
+	if h.UserID != userID {
+		return Hold{}, 0, ErrHoldNotFound // same answer as "does not exist"
 	}
 	switch {
-	case hold.UserID != userID:
-		return Hold{}, ErrHoldNotFound // same answer as "does not exist"
-	case hold.Status == HoldReleased:
-		return hold, nil // already cancelled: retry-safe
-	case hold.Status == HoldConsumed:
-		return Hold{}, ErrHoldAlreadyUsed
-	default:
-		return Hold{}, ErrHoldExpired // EXPIRED, or ACTIVE but past expires_at
+	case h.Status == HoldReleased:
+		hold, err := scanHold(tx.QueryRow(ctx, `SELECT `+holdColumns+` FROM holds WHERE id = $1`, h.ID))
+		if err != nil {
+			return Hold{}, 0, dbError(err, "get hold %d", h.ID)
+		}
+		return hold, 0, tx.Commit(ctx) // already cancelled: retry-safe
+	case h.Status == HoldConsumed:
+		return Hold{}, 0, ErrHoldAlreadyUsed
+	case h.Status != HoldActive, h.Expired:
+		return Hold{}, 0, ErrHoldExpired
 	}
+
+	// Do not cancel in the middle of a payment: the charge may succeed a
+	// moment later, and the user expects a booking, not a refund.
+	var paying bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM payments WHERE hold_id = $1 AND status = 'PENDING')`,
+		h.ID).Scan(&paying); err != nil {
+		return Hold{}, 0, dbError(err, "check payments of hold %d", h.ID)
+	}
+	if paying {
+		return Hold{}, 0, ErrPaymentInProgress
+	}
+
+	hold, err := scanHold(tx.QueryRow(ctx, `
+		UPDATE holds SET status = 'RELEASED', updated_at = NOW()
+		WHERE id = $1
+		RETURNING `+holdColumns, h.ID))
+	if err != nil {
+		return Hold{}, 0, dbError(err, "release hold %d", h.ID)
+	}
+	payload, err := json.Marshal(map[string]any{"show_id": h.ShowID, "seat_id": h.SeatID, "owner": h.UserID})
+	if err != nil {
+		return Hold{}, 0, err
+	}
+	var outboxID int64
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO outbox (kind, payload) VALUES ('RELEASE_LOCK', $1)
+		RETURNING id`, payload).Scan(&outboxID); err != nil {
+		return Hold{}, 0, dbError(err, "insert release outbox row for hold %d", h.ID)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Hold{}, 0, dbError(err, "commit release hold %d", h.ID)
+	}
+	return hold, outboxID, nil
 }

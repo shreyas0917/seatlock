@@ -11,7 +11,10 @@
 // (internal/httpapi/responses.go), not the domain's.
 package booking
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // Show is one performance at one venue at one time.
 type Show struct {
@@ -96,4 +99,57 @@ type HoldSeatInput struct {
 type ConfirmInput struct {
 	UserID string
 	HoldID int64
+}
+
+// PaymentStatus is the lifecycle state of a payment (see the CHECK constraint
+// in db/migrations/0003_payments.up.sql).
+type PaymentStatus string
+
+const (
+	PaymentPending       PaymentStatus = "PENDING"        // outcome not known yet
+	PaymentSucceeded     PaymentStatus = "SUCCEEDED"      // money taken, booking exists
+	PaymentDeclined      PaymentStatus = "DECLINED"       // no money taken
+	PaymentRefundPending PaymentStatus = "REFUND_PENDING" // money taken, refund owed
+	PaymentRefunded      PaymentStatus = "REFUNDED"       // money returned
+)
+
+// Payment is one attempt to charge the user for a hold.
+type Payment struct {
+	ID               int64
+	HoldID           int64
+	UserID           string
+	AmountPaise      int64
+	ChargeKey        string // idempotency key sent to the gateway, "pay-<id>"
+	ProviderChargeID string // the gateway's charge id, once known
+	Status           PaymentStatus
+}
+
+// RefundKey is the idempotency key for refunding this payment. It is derived
+// from the payment id, so every attempt to refund it (inline now, by the
+// worker later) is the SAME refund at the gateway and is paid out once.
+func (p Payment) RefundKey() string {
+	return fmt.Sprintf("refund-%d", p.ID)
+}
+
+// CompleteKind says what Tx B (CompletePayment) decided.
+type CompleteKind int
+
+const (
+	// Booked: the booking exists (just created, or created earlier by a
+	// concurrent request for the same payment).
+	Booked CompleteKind = iota + 1
+	// RefundRequired: money was taken but the hold is no longer valid. The
+	// payment is now REFUND_PENDING and an outbox REFUND row was written.
+	RefundRequired
+	// AlreadyRefunding: an earlier request already decided to refund this
+	// payment; nothing new was written.
+	AlreadyRefunding
+)
+
+// CompleteResult is the outcome of CompletePayment.
+type CompleteResult struct {
+	Kind     CompleteKind
+	Booking  Booking // set when Kind == Booked
+	Payment  Payment
+	OutboxID int64 // the REFUND outbox row, when Kind == RefundRequired
 }

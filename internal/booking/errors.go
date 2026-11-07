@@ -9,7 +9,10 @@
 // works when the error has been wrapped with fmt.Errorf("...: %w", ErrX).
 package booking
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+)
 
 var (
 	// ErrInvalidInput: the request is malformed (e.g. a non-positive ID).
@@ -57,8 +60,40 @@ var (
 	// longer be confirmed. Mapped to 410 HOLD_EXPIRED.
 	ErrHoldExpired = errors.New("hold expired")
 
+	// ErrPaymentDeclined: the gateway declined the charge. No money was
+	// taken and the hold stays ACTIVE, so the user may retry with a new
+	// Idempotency-Key. Mapped to 402 PAYMENT_DECLINED.
+	ErrPaymentDeclined = errors.New("payment declined")
+
+	// ErrPaymentPending: the charge was sent but its outcome is UNKNOWN
+	// (timeout, lost answer). The payment stays PENDING; retrying with the
+	// same Idempotency-Key finds out what happened. Mapped to 504 PAYMENT_PENDING.
+	ErrPaymentPending = errors.New("payment outcome unknown")
+
+	// ErrPaymentInProgress: the hold has a payment in flight, so it cannot
+	// be cancelled right now. Mapped to 409 PAYMENT_IN_PROGRESS.
+	ErrPaymentInProgress = errors.New("payment in progress for this hold")
+
 	// ErrSeatAlreadyBooked: someone else already booked this seat. Produced
 	// when PostgreSQL rejects the insert with a unique-constraint violation
 	// (error code 23505) on bookings_show_seat_unique.
 	ErrSeatAlreadyBooked = errors.New("seat already booked")
 )
+
+// HoldExpiredError is ErrHoldExpired plus, when money had already been taken
+// for the hold, the state of its refund. errors.Is(err, ErrHoldExpired) is
+// true for it, so the error mapping treats it like any expired hold (410),
+// and the handler can add "payment": "REFUNDED" / "REFUND_PENDING".
+type HoldExpiredError struct {
+	PaymentStatus PaymentStatus // "" when no money was taken
+}
+
+func (e *HoldExpiredError) Error() string {
+	if e.PaymentStatus == "" {
+		return ErrHoldExpired.Error()
+	}
+	return fmt.Sprintf("%s (payment %s)", ErrHoldExpired, e.PaymentStatus)
+}
+
+// Is makes errors.Is(err, ErrHoldExpired) match this error type.
+func (e *HoldExpiredError) Is(target error) bool { return target == ErrHoldExpired }

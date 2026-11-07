@@ -83,12 +83,14 @@ func (s *stubRepository) ConfirmHold(ctx context.Context, in booking.ConfirmInpu
 	return booking.Booking{ID: 1, ShowID: 1, SeatID: 7, UserID: in.UserID, HoldID: in.HoldID, CreatedAt: time.Now()}, nil
 }
 
-func (s *stubRepository) ReleaseHold(ctx context.Context, userID string, holdID int64) (booking.Hold, error) {
+func (s *stubRepository) ReleaseHold(ctx context.Context, userID string, holdID int64) (booking.Hold, int64, error) {
 	if s.releaseErr != nil {
-		return booking.Hold{}, s.releaseErr
+		return booking.Hold{}, 0, s.releaseErr
 	}
-	return booking.Hold{ID: holdID, ShowID: 1, SeatID: 7, UserID: userID, Status: booking.HoldReleased}, nil
+	return booking.Hold{ID: holdID, ShowID: 1, SeatID: 7, UserID: userID, Status: booking.HoldReleased}, 1, nil
 }
+
+func (s *stubRepository) MarkOutboxDone(ctx context.Context, outboxID int64) error { return nil }
 
 // stubLocker is a SeatLocker. acquireErr simulates Redis being down; heldBy
 // simulates another user holding the Redis lock.

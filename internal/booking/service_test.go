@@ -34,6 +34,8 @@ type fakeRepository struct {
 	createHoldErr error
 	// createHoldCalls counts CreateHold calls, to prove when it is NOT called.
 	createHoldCalls int
+	// outboxDone lists the outbox rows marked DONE.
+	outboxDone []int64
 }
 
 // newFakeRepository returns a fake with show 1 (seats 1 and 2) and show 2 (seat 3).
@@ -156,19 +158,27 @@ func (f *fakeRepository) ConfirmHold(ctx context.Context, in ConfirmInput) (Book
 	return b, nil
 }
 
-func (f *fakeRepository) ReleaseHold(ctx context.Context, userID string, holdID int64) (Hold, error) {
+func (f *fakeRepository) ReleaseHold(ctx context.Context, userID string, holdID int64) (Hold, int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	h, ok := f.holds[holdID]
 	if !ok || h.UserID != userID {
-		return Hold{}, ErrHoldNotFound
+		return Hold{}, 0, ErrHoldNotFound
 	}
 	if h.Status != HoldActive {
-		return Hold{}, ErrHoldExpired
+		return Hold{}, 0, ErrHoldExpired
 	}
 	h.Status = HoldReleased
 	f.holds[h.ID] = h
-	return h, nil
+	f.nextID++
+	return h, f.nextID, nil
+}
+
+func (f *fakeRepository) MarkOutboxDone(ctx context.Context, outboxID int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.outboxDone = append(f.outboxDone, outboxID)
+	return nil
 }
 
 // fakeLocker implements SeatLocker in memory. Set acquireErr to pretend Redis

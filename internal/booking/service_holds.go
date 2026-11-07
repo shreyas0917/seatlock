@@ -133,9 +133,12 @@ func (s *Service) ConfirmBooking(ctx context.Context, in ConfirmInput) (Booking,
 // CancelHold releases the user's active hold.
 //
 // PostgreSQL is updated first, and that is what counts: once the hold is
-// RELEASED there, the seat is free for everyone. The Redis release is best
-// effort. If Redis is down, the cancel still succeeds; the lock just lingers
-// until its TTL, and new holds on that seat get 409 until then.
+// RELEASED there, the seat is free for everyone. In the same transaction an
+// outbox RELEASE_LOCK row is written, so the Redis lock release is never
+// forgotten. The inline release below is best effort: if it works, the
+// outbox row is marked DONE; if Redis is down, the cancel still succeeds,
+// and the PENDING outbox row waits for the Phase 4 worker (until then the
+// lock lingers until its TTL and new holds on that seat get 409).
 func (s *Service) CancelHold(ctx context.Context, userID string, holdID int64) (Hold, error) {
 	userID = strings.TrimSpace(userID)
 	if userID == "" {
@@ -145,14 +148,16 @@ func (s *Service) CancelHold(ctx context.Context, userID string, holdID int64) (
 		return Hold{}, fmt.Errorf("%w: hold_id must be a positive number", ErrInvalidInput)
 	}
 
-	hold, err := s.repo.ReleaseHold(ctx, userID, holdID)
+	hold, outboxID, err := s.repo.ReleaseHold(ctx, userID, holdID)
 	if err != nil {
 		return Hold{}, err
 	}
 
-	// Phase 4: record this release in the transactional outbox, so a worker
-	// reliably deletes the Redis lock even if Redis is down right now.
-	s.releaseLock(ctx, hold.ShowID, hold.SeatID, userID)
+	// outboxID is 0 when the hold was already released earlier (a retry).
+	if outboxID != 0 && s.releaseLock(ctx, hold.ShowID, hold.SeatID, userID) {
+		// Phase 4: the worker drains RELEASE_LOCK rows that are still PENDING.
+		s.markOutboxDone(ctx, outboxID)
+	}
 	return hold, nil
 }
 
@@ -186,13 +191,25 @@ func asLockUnavailable(err error) error {
 // cancellation: if the client hangs up right after the database commit, we
 // still try to release. The short timeout keeps a slow Redis from delaying
 // the response. Errors are logged, never returned: correctness does not
-// depend on this call, only on PostgreSQL.
-func (s *Service) releaseLock(ctx context.Context, showID, seatID int64, owner string) {
+// depend on this call, only on PostgreSQL. It reports whether it worked.
+func (s *Service) releaseLock(ctx context.Context, showID, seatID int64, owner string) bool {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), releaseTimeout)
 	defer cancel()
 
 	if err := s.locker.Release(ctx, showID, seatID, owner); err != nil {
 		slog.Warn("best-effort lock release failed; the lock will expire by its TTL",
 			"show_id", showID, "seat_id", seatID, "error", err.Error())
+		return false
+	}
+	return true
+}
+
+// markOutboxDone marks an outbox row as handled, best effort: if it fails,
+// the row stays PENDING and the Phase 4 worker simply repeats the (harmless,
+// idempotent) side effect.
+func (s *Service) markOutboxDone(ctx context.Context, outboxID int64) {
+	if err := s.repo.MarkOutboxDone(context.WithoutCancel(ctx), outboxID); err != nil {
+		slog.Warn("could not mark outbox row done; the worker will repeat it",
+			"outbox_id", outboxID, "error", err.Error())
 	}
 }

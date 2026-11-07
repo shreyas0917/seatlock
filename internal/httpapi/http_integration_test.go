@@ -92,7 +92,7 @@ func TestHTTP_ParallelHoldBurstHasNo500s(t *testing.T) {
 	locker := lock.NewRedisLocker(rdb, defaults.HoldTTL, defaults.RedisLockExtra)
 
 	// Fresh data: one show with one seat.
-	_, err = pool.Exec(ctx, `TRUNCATE bookings, holds, seats, shows RESTART IDENTITY CASCADE`)
+	_, err = pool.Exec(ctx, `TRUNCATE bookings, payments, holds, seats, shows, outbox, idempotency_keys RESTART IDENTITY CASCADE`)
 	require.NoError(t, err)
 	var showID, seatID int64
 	require.NoError(t, pool.QueryRow(ctx, `
