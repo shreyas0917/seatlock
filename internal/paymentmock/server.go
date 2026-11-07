@@ -36,6 +36,9 @@ const (
 	// The client times out. This simulates the most dangerous real-world
 	// case: the money was taken, but the answer was lost.
 	BehaviorTimeout = "timeout"
+	// BehaviorRefundFail makes the next refund fail with HTTP 500 (queue it
+	// with POST /debug/next-behavior), to demonstrate outbox retries.
+	BehaviorRefundFail = "refund_fail"
 )
 
 // Charge statuses.
@@ -43,6 +46,10 @@ const (
 	StatusSucceeded = "succeeded"
 	StatusDeclined  = "declined"
 	StatusRefunded  = "refunded"
+	// StatusVoided: the key was closed with POST /charges/{key}/void before
+	// any charge happened. Any later charge with that key is refused: no
+	// money is ever taken for it.
+	StatusVoided = "voided"
 )
 
 // Options controls random behaviour (for demos) and the slow delay.
@@ -91,10 +98,12 @@ type RefundResponse struct {
 type Stats struct {
 	ChargesCreated map[string]int `json:"charges_created"`
 	ChargeRequests map[string]int `json:"charge_requests"`
-	RefundsCreated map[string]int `json:"refunds_created"`     // per charge idempotency key
-	TotalCharges   int            `json:"total_charges"`       // every charge created, declined included
+	RefundsCreated map[string]int `json:"refunds_created"` // per charge idempotency key
+	VoidedKeys     map[string]int `json:"voided_keys"`
+	TotalCharges   int            `json:"total_charges"`       // every charge created, declined included (voided keys excluded)
 	MoneyTaken     int            `json:"money_taken_charges"` // charges that took money (succeeded or later refunded)
 	TotalRefunds   int            `json:"total_refunds"`
+	TotalVoids     int            `json:"total_voids"`
 }
 
 type charge struct {
@@ -114,6 +123,7 @@ type Server struct {
 	refundsByKey   map[string]RefundResponse
 	chargeRequests map[string]int
 	queue          []string // behaviours for the next charges, oldest first
+	refundFailures int      // how many upcoming refunds must fail (refund_fail)
 	nextID         int
 	rng            *rand.Rand
 }
@@ -135,6 +145,7 @@ func New(opts Options) *Server {
 	s.mux = http.NewServeMux()
 	s.mux.HandleFunc("POST /charges", s.createCharge)
 	s.mux.HandleFunc("GET /charges/{key}", s.getCharge)
+	s.mux.HandleFunc("POST /charges/{key}/void", s.voidCharge)
 	s.mux.HandleFunc("POST /refunds", s.createRefund)
 	s.mux.HandleFunc("POST /debug/next-behavior", s.queueBehavior)
 	s.mux.HandleFunc("POST /debug/reset", s.reset)
@@ -155,6 +166,7 @@ func (s *Server) resetLocked() {
 	s.refundsByKey = map[string]RefundResponse{}
 	s.chargeRequests = map[string]int{}
 	s.queue = nil
+	s.refundFailures = 0
 }
 
 func (s *Server) createCharge(w http.ResponseWriter, r *http.Request) {
@@ -171,6 +183,12 @@ func (s *Server) createCharge(w http.ResponseWriter, r *http.Request) {
 	// immediately, with no second charge, whatever behaviour is queued.
 	if existing, ok := s.chargesByKey[req.IdempotencyKey]; ok {
 		s.mu.Unlock()
+		if existing.Status == StatusVoided {
+			// The key was closed before any charge happened (a late request
+			// arriving after reconciliation). Refuse it: no money is taken.
+			writeJSON(w, http.StatusOK, existing.ChargeResponse)
+			return
+		}
 		if existing.AmountPaise != req.AmountPaise {
 			// Same key, different request: a client bug. Real gateways refuse it.
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "idempotency key reused with a different amount"})
@@ -262,6 +280,26 @@ func (s *Server) getCharge(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, c.ChargeResponse)
 }
 
+// voidCharge handles POST /charges/{key}/void: "close this key".
+//
+// If no charge exists for the key, the key is recorded as VOIDED: any charge
+// that arrives later with it is refused (no money taken). If a charge already
+// exists, nothing changes and its real result is returned, e.g. "succeeded"
+// when a slow request reached the gateway just before the void.
+func (s *Server) voidCharge(w http.ResponseWriter, r *http.Request) {
+	key := r.PathValue("key")
+	s.mu.Lock()
+	c, ok := s.chargesByKey[key]
+	if !ok {
+		c = &charge{ChargeResponse: ChargeResponse{Status: StatusVoided, IdempotencyKey: key}}
+		s.chargesByKey[key] = c
+	}
+	resp := c.ChargeResponse
+	s.mu.Unlock()
+	s.opts.Logger.Info("void", "key", key, "status", resp.Status, "was_new", !ok)
+	writeJSON(w, http.StatusOK, resp)
+}
+
 func (s *Server) createRefund(w http.ResponseWriter, r *http.Request) {
 	var req RefundRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.IdempotencyKey == "" || req.ChargeID == "" {
@@ -271,6 +309,12 @@ func (s *Server) createRefund(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if s.refundFailures > 0 {
+		s.refundFailures--
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "simulated refund failure"})
+		return
+	}
 
 	// Same refund key -> same result.
 	if existing, ok := s.refundsByKey[req.IdempotencyKey]; ok {
@@ -282,8 +326,8 @@ func (s *Server) createRefund(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "charge not found"})
 		return
 	}
-	if c.Status == StatusDeclined {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "a declined charge cannot be refunded"})
+	if c.Status == StatusDeclined || c.Status == StatusVoided {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "no money was taken for this charge"})
 		return
 	}
 	// A charge is refunded at most once, even with a different refund key.
@@ -309,19 +353,23 @@ func (s *Server) queueBehavior(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch req.Behavior {
-	case BehaviorOK, BehaviorDecline, BehaviorSlow, BehaviorTimeout:
+	case BehaviorOK, BehaviorDecline, BehaviorSlow, BehaviorTimeout, BehaviorRefundFail:
 	default:
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "behavior must be ok, decline, slow or timeout"})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "behavior must be ok, decline, slow, timeout or refund_fail"})
 		return
 	}
 	if req.Count <= 0 {
 		req.Count = 1
 	}
 	s.mu.Lock()
-	for i := 0; i < req.Count; i++ {
-		s.queue = append(s.queue, req.Behavior)
+	if req.Behavior == BehaviorRefundFail {
+		s.refundFailures += req.Count // refunds have their own counter
+	} else {
+		for i := 0; i < req.Count; i++ {
+			s.queue = append(s.queue, req.Behavior)
+		}
 	}
-	queued := len(s.queue)
+	queued := len(s.queue) + s.refundFailures
 	s.mu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]int{"queued": queued})
 }
@@ -347,8 +395,14 @@ func (s *Server) Stats() Stats {
 		ChargesCreated: map[string]int{},
 		ChargeRequests: map[string]int{},
 		RefundsCreated: map[string]int{},
+		VoidedKeys:     map[string]int{},
 	}
 	for key, c := range s.chargesByKey {
+		if c.Status == StatusVoided {
+			st.VoidedKeys[key] = 1
+			st.TotalVoids++
+			continue // a voided key never took money
+		}
 		st.ChargesCreated[key] = 1 // one map entry = one real charge
 		st.TotalCharges++
 		if c.Status != StatusDeclined {

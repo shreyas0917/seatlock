@@ -168,3 +168,50 @@ func TestGetChargeAndReset(t *testing.T) {
 	_, out := post(t, srv.Client(), srv.URL+"/charges", `{"idempotency_key":"x","amount_paise":1}`, "")
 	assert.Equal(t, StatusSucceeded, out["status"], "reset must also clear queued behaviours")
 }
+
+func TestVoid_UnknownKey_BlocksLaterCharge(t *testing.T) {
+	mock, srv := newTestServer(t)
+
+	status, voided := post(t, srv.Client(), srv.URL+"/charges/pay-9/void", `{}`, "")
+	require.Equal(t, http.StatusOK, status)
+	assert.Equal(t, StatusVoided, voided["status"])
+
+	// A late request with the voided key must not take money.
+	_, late := post(t, srv.Client(), srv.URL+"/charges", `{"idempotency_key":"pay-9","amount_paise":25000}`, "")
+	assert.Equal(t, StatusVoided, late["status"])
+	st := mock.Stats()
+	assert.Equal(t, 0, st.MoneyTaken)
+	assert.Equal(t, 0, st.TotalCharges)
+	assert.Equal(t, 1, st.TotalVoids)
+}
+
+// TestVoid_AfterCharge_ReturnsRealResult is the void race from the other side:
+// the slow charge got there first, so the void reports "succeeded".
+func TestVoid_AfterCharge_ReturnsRealResult(t *testing.T) {
+	mock, srv := newTestServer(t)
+	post(t, srv.Client(), srv.URL+"/charges", `{"idempotency_key":"pay-9","amount_paise":25000}`, "")
+
+	_, out := post(t, srv.Client(), srv.URL+"/charges/pay-9/void", `{}`, "")
+
+	assert.Equal(t, StatusSucceeded, out["status"])
+	assert.NotEmpty(t, out["charge_id"])
+	assert.Equal(t, 0, mock.Stats().TotalVoids)
+	assert.Equal(t, 1, mock.Stats().MoneyTaken)
+}
+
+func TestRefundFail_FailsTheNextNRefunds(t *testing.T) {
+	mock, srv := newTestServer(t)
+	_, charge := post(t, srv.Client(), srv.URL+"/charges", `{"idempotency_key":"pay-1","amount_paise":25000}`, "")
+	post(t, srv.Client(), srv.URL+"/debug/next-behavior", `{"behavior":"refund_fail","count":2}`, "")
+	body := `{"idempotency_key":"refund-1","charge_id":"` + charge["charge_id"].(string) + `"}`
+
+	s1, _ := post(t, srv.Client(), srv.URL+"/refunds", body, "")
+	s2, _ := post(t, srv.Client(), srv.URL+"/refunds", body, "")
+	s3, out := post(t, srv.Client(), srv.URL+"/refunds", body, "")
+
+	assert.Equal(t, http.StatusInternalServerError, s1)
+	assert.Equal(t, http.StatusInternalServerError, s2)
+	assert.Equal(t, http.StatusOK, s3)
+	assert.Equal(t, StatusRefunded, out["status"])
+	assert.Equal(t, 1, mock.Stats().TotalRefunds)
+}
