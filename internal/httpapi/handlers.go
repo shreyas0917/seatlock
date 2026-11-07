@@ -49,6 +49,7 @@ const readinessTimeout = 1 * time.Second
 // handlers holds the dependencies shared by all endpoints.
 type handlers struct {
 	svc      BookingService
+	idem     IdempotencyStore
 	postgres Pinger
 	redis    Pinger
 	logger   *slog.Logger
@@ -238,45 +239,6 @@ func (h *handlers) cancelHold(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, toHoldResponse(hold))
-}
-
-// confirmBooking godoc
-//
-//	@Summary		Confirm a hold into a booking
-//	@Description	Turns the user's active hold into a booking. Uses PostgreSQL only, so it still
-//	@Description	works while Redis is down. Of several concurrent confirms of one hold, exactly
-//	@Description	one gets 201 and the rest get 409 HOLD_ALREADY_USED.
-//	@Tags			bookings
-//	@Accept			json
-//	@Produce		json
-//	@Param			X-User-ID	header		string					true	"Owner of the hold"
-//	@Param			request		body		ConfirmBookingRequest	true	"Hold to confirm"
-//	@Success		201			{object}	BookingResponse
-//	@Failure		400			{object}	ErrorResponse	"Bad input or missing X-User-ID"
-//	@Failure		404			{object}	ErrorResponse	"HOLD_NOT_FOUND (also for another user's hold)"
-//	@Failure		409			{object}	ErrorResponse	"HOLD_ALREADY_USED or SEAT_ALREADY_BOOKED"
-//	@Failure		410			{object}	ErrorResponse	"HOLD_EXPIRED"
-//	@Failure		503			{object}	ErrorResponse	"SERVICE_BUSY"
-//	@Failure		500			{object}	ErrorResponse
-//	@Router			/v1/bookings [post]
-func (h *handlers) confirmBooking(w http.ResponseWriter, r *http.Request) {
-	var req ConfirmBookingRequest
-	if err := decodeJSON(w, r, &req); err != nil {
-		h.writeError(w, r, err)
-		return
-	}
-
-	// The handler only passes the header along; deciding that an empty user
-	// is invalid is a business rule, so the service checks it.
-	b, err := h.svc.ConfirmBooking(r.Context(), booking.ConfirmInput{
-		UserID: r.Header.Get(userIDHeader),
-		HoldID: req.HoldID,
-	})
-	if err != nil {
-		h.writeError(w, r, err)
-		return
-	}
-	writeJSON(w, http.StatusCreated, toBookingResponse(b))
 }
 
 // getBooking godoc

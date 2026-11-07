@@ -19,6 +19,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	"github.com/shreyas0917/seatlock/internal/booking"
+	"github.com/shreyas0917/seatlock/internal/idempotency"
 )
 
 // httpError is the status code and public error details for one error.
@@ -60,6 +61,14 @@ func mapError(err error) httpError {
 		// 410 Gone: the hold existed, but it is gone for good. Retrying the
 		// same request will never work; the user must hold the seat again.
 		return httpError{http.StatusGone, "HOLD_EXPIRED", "this hold has expired or was cancelled"}
+	case errors.Is(err, idempotency.ErrMissingKey):
+		return httpError{http.StatusBadRequest, "MISSING_IDEMPOTENCY_KEY", "the Idempotency-Key header is required (1-64 characters)"}
+	case errors.Is(err, idempotency.ErrKeyReused):
+		// 422: the request is well-formed, but this key already belongs to a
+		// DIFFERENT request. Use a new key for a new request.
+		return httpError{http.StatusUnprocessableEntity, "IDEMPOTENCY_KEY_REUSED", "this Idempotency-Key was already used for a different request"}
+	case errors.Is(err, idempotency.ErrInProgress):
+		return httpError{http.StatusConflict, "REQUEST_IN_PROGRESS", "a request with this Idempotency-Key is still in progress; retry shortly"}
 	case errors.Is(err, booking.ErrPaymentInProgress):
 		return httpError{http.StatusConflict, "PAYMENT_IN_PROGRESS", "a payment for this hold is in progress; it cannot be cancelled now"}
 	case errors.Is(err, booking.ErrPaymentDeclined):
@@ -90,31 +99,53 @@ func mapError(err error) httpError {
 	}
 }
 
-// writeError sends the JSON error response for err, and logs 500 and 503
-// errors (with the full error text and the request ID) so they can be found
-// in the logs.
-func (h *handlers) writeError(w http.ResponseWriter, r *http.Request, err error) {
+// errorResponse turns err into the status and JSON body to send, and logs
+// 5xx errors (with the full error text and the request ID) so they can be
+// found in the logs. The confirm endpoint also STORES this body for replay.
+func (h *handlers) errorResponse(r *http.Request, err error) (int, ErrorResponse) {
 	he := mapError(err)
 
-	switch he.status {
-	case http.StatusInternalServerError:
+	switch {
+	case he.status == http.StatusInternalServerError:
 		h.logger.Error("request failed",
 			"request_id", middleware.GetReqID(r.Context()),
 			"method", r.Method,
 			"path", r.URL.Path,
 			"error", err.Error(),
 		)
-	case http.StatusServiceUnavailable:
-		// Not a bug, but we still log the full error so overload is visible.
-		h.logger.Warn("service unavailable",
+	case he.status >= 500:
+		// 503/504: not a bug, but we still log the full error so overload
+		// and unknown payment outcomes are visible.
+		h.logger.Warn("request not completed",
 			"request_id", middleware.GetReqID(r.Context()),
 			"method", r.Method,
 			"path", r.URL.Path,
+			"status", he.status,
 			"error", err.Error(),
 		)
-		// Tells well-behaved clients how many seconds to wait before retrying.
-		w.Header().Set("Retry-After", "1")
 	}
 
-	writeJSON(w, he.status, ErrorResponse{Error: ErrorBody{Code: he.code, Message: he.message}})
+	body := ErrorResponse{Error: ErrorBody{Code: he.code, Message: he.message}}
+	// A hold that expired AFTER money was taken: tell the user what happened
+	// to the money ("REFUNDED" or "REFUND_PENDING").
+	var expired *booking.HoldExpiredError
+	if errors.As(err, &expired) && expired.PaymentStatus != "" {
+		body.Error.Payment = string(expired.PaymentStatus)
+	}
+	return he.status, body
+}
+
+// writeError sends the JSON error response for err.
+func (h *handlers) writeError(w http.ResponseWriter, r *http.Request, err error) {
+	status, body := h.errorResponse(r, err)
+	setRetryAfter(w, status)
+	writeJSON(w, status, body)
+}
+
+// setRetryAfter tells well-behaved clients how many seconds to wait before
+// retrying a temporary failure.
+func setRetryAfter(w http.ResponseWriter, status int) {
+	if status == http.StatusServiceUnavailable || status == http.StatusGatewayTimeout {
+		w.Header().Set("Retry-After", "1")
+	}
 }

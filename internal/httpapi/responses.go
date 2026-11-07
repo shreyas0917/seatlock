@@ -37,6 +37,9 @@ type ErrorResponse struct {
 type ErrorBody struct {
 	Code    string `json:"code" example:"SEAT_ALREADY_BOOKED"`
 	Message string `json:"message" example:"this seat has already been booked"`
+	// Payment is only set on 410 HOLD_EXPIRED when money had been taken:
+	// "REFUNDED" or "REFUND_PENDING".
+	Payment string `json:"payment,omitempty" example:"REFUNDED"`
 }
 
 // ShowResponse is one show.

@@ -63,6 +63,10 @@ type Config struct {
 
 	// PaymentURL is the base URL of the payment gateway (the mock in this project).
 	PaymentURL string
+	// IdempotencyLease is how long a request owns an Idempotency-Key before
+	// a retry may take it over. Must be longer than one whole confirm
+	// (two transactions + PaymentTimeout).
+	IdempotencyLease time.Duration
 	// PaymentTimeout caps one call to the gateway. When it fires, the outcome
 	// of a charge is UNKNOWN (the payment stays PENDING, 504 to the client).
 	PaymentTimeout time.Duration
@@ -125,6 +129,7 @@ func Load() (Config, error) {
 		{"HOLD_TTL", 300 * time.Second, &cfg.HoldTTL},
 		{"REDIS_LOCK_EXTRA", 10 * time.Second, &cfg.RedisLockExtra},
 		{"PAYMENT_TIMEOUT", 5 * time.Second, &cfg.PaymentTimeout},
+		{"IDEMPOTENCY_LEASE", 30 * time.Second, &cfg.IdempotencyLease},
 	}
 	for _, d := range durations {
 		value, err := getDuration(d.key, d.fallback)

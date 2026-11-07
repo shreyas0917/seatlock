@@ -27,6 +27,13 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// writeRawJSON sends an already-encoded JSON body (a stored idempotent response).
+func writeRawJSON(w http.ResponseWriter, status int, body []byte) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_, _ = w.Write(body)
+}
+
 // decodeJSON reads the request body into dst. Any problem (bad JSON, unknown
 // fields, extra data, too large) becomes booking.ErrInvalidInput, so the
 // central error mapper answers 400 Bad Request.

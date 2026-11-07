@@ -34,6 +34,7 @@ import (
 	"github.com/shreyas0917/seatlock/internal/booking"
 	"github.com/shreyas0917/seatlock/internal/config"
 	"github.com/shreyas0917/seatlock/internal/db"
+	"github.com/shreyas0917/seatlock/internal/idempotency"
 	"github.com/shreyas0917/seatlock/internal/lock"
 	"github.com/shreyas0917/seatlock/internal/payment"
 	"github.com/shreyas0917/seatlock/internal/paymentmock"
@@ -110,7 +111,8 @@ func TestHTTP_ParallelHoldBurstHasNo500s(t *testing.T) {
 	t.Cleanup(mockServer.Close)
 	gateway := payment.NewClient(mockServer.URL, 3*time.Second)
 	svc := booking.NewService(booking.NewPostgresRepository(pool, testDBQueryTimeout), locker, gateway, defaults.HoldTTL)
-	server := httptest.NewServer(NewRouter(svc, pool, locker, logger))
+	idem := idempotency.NewStore(pool, 30*time.Second, testDBQueryTimeout)
+	server := httptest.NewServer(NewRouter(svc, idem, pool, locker, logger))
 	t.Cleanup(server.Close)
 
 	// Allow 50 open connections from the client so the requests really run in parallel.
@@ -122,6 +124,7 @@ func TestHTTP_ParallelHoldBurstHasNo500s(t *testing.T) {
 		}
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("X-User-ID", userID)
+		req.Header.Set("Idempotency-Key", "burst-"+userID) // only the confirm needs it; holds ignore it
 		resp, err := client.Do(req)
 		if err != nil {
 			return httpResult{err: err}

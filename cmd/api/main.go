@@ -39,6 +39,7 @@ import (
 	"github.com/shreyas0917/seatlock/internal/config"
 	"github.com/shreyas0917/seatlock/internal/db"
 	"github.com/shreyas0917/seatlock/internal/httpapi"
+	"github.com/shreyas0917/seatlock/internal/idempotency"
 	"github.com/shreyas0917/seatlock/internal/lock"
 	"github.com/shreyas0917/seatlock/internal/payment"
 )
@@ -103,7 +104,10 @@ func run() error {
 	// the confirm/payment path depends on Redis.
 	gateway := payment.NewClient(cfg.PaymentURL, cfg.PaymentTimeout)
 	svc := booking.NewService(repo, locker, gateway, cfg.HoldTTL)
-	router := httpapi.NewRouter(svc, pool, locker, logger)
+	// Idempotency-Keys for POST /v1/bookings live in Postgres (not Redis), so
+	// duplicate protection keeps working while Redis is down.
+	idem := idempotency.NewStore(pool, cfg.IdempotencyLease, cfg.DBQueryTimeout)
+	router := httpapi.NewRouter(svc, idem, pool, locker, logger)
 
 	server := &http.Server{
 		Addr:    cfg.HTTPAddr,

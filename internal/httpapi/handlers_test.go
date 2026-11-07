@@ -17,6 +17,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -24,6 +26,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/shreyas0917/seatlock/internal/booking"
+	"github.com/shreyas0917/seatlock/internal/idempotency"
 )
 
 // stubRepository knows show 1 with seat 7. The *Err fields, when set, are
@@ -149,6 +152,64 @@ func (g stubGateway) Refund(ctx context.Context, req booking.RefundRequest) (boo
 	return booking.RefundResult{RefundID: "re_1"}, nil
 }
 
+// fakeIdem is an in-memory IdempotencyStore with the same rules as
+// internal/idempotency (minus leases): new key -> proceed, same key and
+// request after completion -> replay, different request -> ErrKeyReused,
+// still running -> ErrInProgress, released -> runs again.
+type fakeIdem struct {
+	mu      sync.Mutex
+	entries map[string]*fakeIdemEntry
+}
+
+type fakeIdemEntry struct {
+	hash      string
+	token     string
+	completed bool
+	resp      idempotency.Response
+}
+
+func newFakeIdem() *fakeIdem { return &fakeIdem{entries: map[string]*fakeIdemEntry{}} }
+
+func (f *fakeIdem) Begin(ctx context.Context, userID, key, hash string) (idempotency.Claim, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	e, ok := f.entries[userID+"/"+key]
+	switch {
+	case !ok:
+		f.entries[userID+"/"+key] = &fakeIdemEntry{hash: hash, token: "t1"}
+		return idempotency.Claim{Kind: idempotency.Proceed, Token: "t1"}, nil
+	case e.hash != hash:
+		return idempotency.Claim{}, idempotency.ErrKeyReused
+	case e.completed:
+		return idempotency.Claim{Kind: idempotency.Replay, Stored: e.resp}, nil
+	case e.token != "":
+		return idempotency.Claim{}, idempotency.ErrInProgress
+	default: // released: take it again
+		e.token = "t2"
+		return idempotency.Claim{Kind: idempotency.Proceed, Token: "t2"}, nil
+	}
+}
+
+func (f *fakeIdem) Complete(ctx context.Context, userID, key, token string, resp idempotency.Response) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	e := f.entries[userID+"/"+key]
+	if e == nil || e.token != token {
+		return false, nil
+	}
+	e.completed, e.resp, e.token = true, resp, ""
+	return true, nil
+}
+
+func (f *fakeIdem) Release(ctx context.Context, userID, key, token string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if e := f.entries[userID+"/"+key]; e != nil && e.token == token {
+		e.token = ""
+	}
+	return nil
+}
+
 // stubPinger simulates a dependency for /readyz.
 type stubPinger struct{ err error }
 
@@ -158,7 +219,7 @@ func (p stubPinger) Ping(ctx context.Context) error { return p.err }
 func newTestRouter(repo *stubRepository, locker stubLocker) http.Handler {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	svc := booking.NewService(repo, locker, stubGateway{}, 300*time.Second)
-	return NewRouter(svc, stubPinger{}, stubPinger{}, logger)
+	return NewRouter(svc, newFakeIdem(), stubPinger{}, stubPinger{}, logger)
 }
 
 // send performs one request against the router and returns the recorded
@@ -170,6 +231,28 @@ func send(t *testing.T, router http.Handler, method, path, userID, body string) 
 	req.Header.Set("Content-Type", "application/json")
 	if userID != "" {
 		req.Header.Set("X-User-ID", userID)
+	}
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	return rec
+}
+
+// sendConfirm sends POST /v1/bookings with an Idempotency-Key.
+func sendConfirm(t *testing.T, router http.Handler, userID, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	return sendWithKey(t, router, userID, "test-key-1", body)
+}
+
+// sendWithKey sends POST /v1/bookings with the given Idempotency-Key ("" = none).
+func sendWithKey(t *testing.T, router http.Handler, userID, key, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/v1/bookings", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	if userID != "" {
+		req.Header.Set("X-User-ID", userID)
+	}
+	if key != "" {
+		req.Header.Set("Idempotency-Key", key)
 	}
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -284,7 +367,7 @@ func TestCreateHold_500HidesInternalError(t *testing.T) {
 // ---------- POST /v1/bookings (confirm) ----------
 
 func TestConfirmBooking_201Created(t *testing.T) {
-	rec := send(t, newTestRouter(&stubRepository{}, stubLocker{}), http.MethodPost, "/v1/bookings", "alice", `{"hold_id": 12}`)
+	rec := sendConfirm(t, newTestRouter(&stubRepository{}, stubLocker{}), "alice", `{"hold_id": 12}`)
 
 	require.Equal(t, http.StatusCreated, rec.Code)
 	var resp BookingResponse
@@ -296,7 +379,7 @@ func TestConfirmBooking_201Created(t *testing.T) {
 func TestConfirmBooking_201EvenWhenRedisIsDown(t *testing.T) {
 	redisDown := stubLocker{acquireErr: booking.ErrLockUnavailable}
 
-	rec := send(t, newTestRouter(&stubRepository{}, redisDown), http.MethodPost, "/v1/bookings", "alice", `{"hold_id": 12}`)
+	rec := sendConfirm(t, newTestRouter(&stubRepository{}, redisDown), "alice", `{"hold_id": 12}`)
 
 	assert.Equal(t, http.StatusCreated, rec.Code, "confirm uses Postgres only")
 }
@@ -320,7 +403,7 @@ func TestConfirmBooking_Errors(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			rec := send(t, newTestRouter(tc.repo, stubLocker{}), http.MethodPost, "/v1/bookings", tc.userID, tc.body)
+			rec := sendConfirm(t, newTestRouter(tc.repo, stubLocker{}), tc.userID, tc.body)
 
 			assert.Equal(t, tc.wantStatus, rec.Code)
 			assert.Equal(t, tc.wantCode, decodeErrorCode(t, rec))
@@ -397,7 +480,7 @@ func TestReadyz(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			router := NewRouter(svc, tc.postgres, tc.redis, logger)
+			router := NewRouter(svc, newFakeIdem(), tc.postgres, tc.redis, logger)
 
 			rec := send(t, router, http.MethodGet, "/readyz", "", "")
 
@@ -426,9 +509,9 @@ func TestConfirmBooking_PaymentErrors(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 			svc := booking.NewService(&stubRepository{}, stubLocker{}, tc.gateway, time.Minute)
-			router := NewRouter(svc, stubPinger{}, stubPinger{}, logger)
+			router := NewRouter(svc, newFakeIdem(), stubPinger{}, stubPinger{}, logger)
 
-			rec := send(t, router, http.MethodPost, "/v1/bookings", "alice", `{"hold_id": 12}`)
+			rec := sendConfirm(t, router, "alice", `{"hold_id": 12}`)
 
 			assert.Equal(t, tc.wantStatus, rec.Code)
 			assert.Equal(t, tc.wantCode, decodeErrorCode(t, rec))
@@ -442,4 +525,82 @@ func TestCancelHold_409PaymentInProgress(t *testing.T) {
 
 	assert.Equal(t, http.StatusConflict, rec.Code)
 	assert.Equal(t, "PAYMENT_IN_PROGRESS", decodeErrorCode(t, rec))
+}
+
+// ---------- Idempotency-Key (Phase 3) ----------
+
+func TestConfirm_400MissingOrBadIdempotencyKey(t *testing.T) {
+	router := newTestRouter(&stubRepository{}, stubLocker{})
+
+	rec := sendWithKey(t, router, "alice", "", `{"hold_id": 12}`)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Equal(t, "MISSING_IDEMPOTENCY_KEY", decodeErrorCode(t, rec))
+
+	rec = sendWithKey(t, router, "alice", strings.Repeat("k", 65), `{"hold_id": 12}`)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Equal(t, "MISSING_IDEMPOTENCY_KEY", decodeErrorCode(t, rec))
+}
+
+func TestConfirm_SameKeyIsReplayedExactly(t *testing.T) {
+	router := newTestRouter(&stubRepository{}, stubLocker{})
+
+	first := sendWithKey(t, router, "alice", "k1", `{"hold_id": 12}`)
+	second := sendWithKey(t, router, "alice", "k1", `{ "hold_id" : 12 }`) // same request, other spacing
+
+	require.Equal(t, http.StatusCreated, first.Code)
+	assert.Empty(t, first.Header().Get("Idempotent-Replayed"))
+	assert.Equal(t, http.StatusCreated, second.Code)
+	assert.Equal(t, "true", second.Header().Get("Idempotent-Replayed"))
+	assert.Equal(t, first.Body.String(), second.Body.String(), "the replay is byte-for-byte identical")
+}
+
+func TestConfirm_422KeyReusedWithDifferentHold(t *testing.T) {
+	router := newTestRouter(&stubRepository{}, stubLocker{})
+	sendWithKey(t, router, "alice", "k1", `{"hold_id": 12}`)
+
+	rec := sendWithKey(t, router, "alice", "k1", `{"hold_id": 13}`)
+
+	assert.Equal(t, http.StatusUnprocessableEntity, rec.Code)
+	assert.Equal(t, "IDEMPOTENCY_KEY_REUSED", decodeErrorCode(t, rec))
+}
+
+func TestConfirm_409RequestInProgress(t *testing.T) {
+	idem := newFakeIdem()
+	_, err := idem.Begin(context.Background(), "alice", "k1",
+		idempotency.RequestHash(http.MethodPost, "/v1/bookings", "hold_id=12"))
+	require.NoError(t, err) // another request holds the key right now
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	router := NewRouter(booking.NewService(&stubRepository{}, stubLocker{}, stubGateway{}, time.Minute), idem, stubPinger{}, stubPinger{}, logger)
+
+	rec := sendWithKey(t, router, "alice", "k1", `{"hold_id": 12}`)
+
+	assert.Equal(t, http.StatusConflict, rec.Code)
+	assert.Equal(t, "REQUEST_IN_PROGRESS", decodeErrorCode(t, rec))
+}
+
+// A 504 (payment outcome unknown) is NOT stored: the retry with the same key
+// runs again and can reach a final answer.
+func TestConfirm_504IsNotStored_RetryRunsAgain(t *testing.T) {
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	idem := newFakeIdem()
+	noAnswer := stubGateway{chargeErr: fmt.Errorf("charge: %w", booking.ErrGatewayNoAnswer)}
+	router := NewRouter(booking.NewService(&stubRepository{}, stubLocker{}, noAnswer, time.Minute), idem, stubPinger{}, stubPinger{}, logger)
+
+	rec := sendWithKey(t, router, "alice", "k1", `{"hold_id": 12}`)
+	require.Equal(t, http.StatusGatewayTimeout, rec.Code)
+	assert.Equal(t, "1", rec.Header().Get("Retry-After"))
+
+	// The gateway answers now; the same key runs again (not a replay of 504).
+	router = NewRouter(booking.NewService(&stubRepository{}, stubLocker{}, stubGateway{}, time.Minute), idem, stubPinger{}, stubPinger{}, logger)
+	rec = sendWithKey(t, router, "alice", "k1", `{"hold_id": 12}`)
+	assert.Equal(t, http.StatusCreated, rec.Code)
+	assert.Empty(t, rec.Header().Get("Idempotent-Replayed"))
+}
+
+func TestConfirm_410IncludesRefundState(t *testing.T) {
+	rec := sendConfirm(t, newTestRouter(&stubRepository{confirmErr: &booking.HoldExpiredError{PaymentStatus: booking.PaymentRefunded}}, stubLocker{}),
+		"alice", `{"hold_id": 12}`)
+
+	assert.Equal(t, http.StatusGone, rec.Code)
+	assert.Contains(t, rec.Body.String(), `"payment":"REFUNDED"`)
 }

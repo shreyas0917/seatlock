@@ -63,7 +63,7 @@ const docTemplate = `{
         },
         "/v1/bookings": {
             "post": {
-                "description": "Turns the user's active hold into a booking. Uses PostgreSQL only, so it still\nworks while Redis is down. Of several concurrent confirms of one hold, exactly\none gets 201 and the rest get 409 HOLD_ALREADY_USED.",
+                "description": "Charges the seat price for the user's active hold and turns it into a booking.\nRequires an Idempotency-Key: sending the same request again with the same key\nreturns the stored response (header Idempotent-Replayed: true) and never charges twice.\nUses PostgreSQL only, so it works while Redis is down.",
                 "consumes": [
                     "application/json"
                 ],
@@ -73,12 +73,19 @@ const docTemplate = `{
                 "tags": [
                     "bookings"
                 ],
-                "summary": "Confirm a hold into a booking",
+                "summary": "Confirm a hold: pay, then book",
                 "parameters": [
                     {
                         "type": "string",
                         "description": "Owner of the hold",
                         "name": "X-User-ID",
+                        "in": "header",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Unique key for this confirm (1-64 characters)",
+                        "name": "Idempotency-Key",
                         "in": "header",
                         "required": true
                     },
@@ -100,7 +107,13 @@ const docTemplate = `{
                         }
                     },
                     "400": {
-                        "description": "Bad input or missing X-User-ID",
+                        "description": "Bad input, missing X-User-ID or Idempotency-Key",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    },
+                    "402": {
+                        "description": "PAYMENT_DECLINED (hold kept; retry with a new key)",
                         "schema": {
                             "$ref": "#/definitions/httpapi.ErrorResponse"
                         }
@@ -112,13 +125,19 @@ const docTemplate = `{
                         }
                     },
                     "409": {
-                        "description": "HOLD_ALREADY_USED or SEAT_ALREADY_BOOKED",
+                        "description": "HOLD_ALREADY_USED, SEAT_ALREADY_BOOKED or REQUEST_IN_PROGRESS",
                         "schema": {
                             "$ref": "#/definitions/httpapi.ErrorResponse"
                         }
                     },
                     "410": {
-                        "description": "HOLD_EXPIRED",
+                        "description": "HOLD_EXPIRED (error.payment = REFUNDED / REFUND_PENDING if money was taken)",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    },
+                    "422": {
+                        "description": "IDEMPOTENCY_KEY_REUSED",
                         "schema": {
                             "$ref": "#/definitions/httpapi.ErrorResponse"
                         }
@@ -131,6 +150,12 @@ const docTemplate = `{
                     },
                     "503": {
                         "description": "SERVICE_BUSY",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    },
+                    "504": {
+                        "description": "PAYMENT_PENDING (outcome unknown; retry with the SAME key)",
                         "schema": {
                             "$ref": "#/definitions/httpapi.ErrorResponse"
                         }
@@ -486,6 +511,11 @@ const docTemplate = `{
                 "message": {
                     "type": "string",
                     "example": "this seat has already been booked"
+                },
+                "payment": {
+                    "description": "Payment is only set on 410 HOLD_EXPIRED when money had been taken:\n\"REFUNDED\" or \"REFUND_PENDING\".",
+                    "type": "string",
+                    "example": "REFUNDED"
                 }
             }
         },
