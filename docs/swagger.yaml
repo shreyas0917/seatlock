@@ -5,6 +5,9 @@ definitions:
       created_at:
         example: "2026-11-07T10:00:00Z"
         type: string
+      hold_id:
+        example: 12
+        type: integer
       id:
         example: 1
         type: integer
@@ -18,7 +21,13 @@ definitions:
         example: user-42
         type: string
     type: object
-  httpapi.CreateBookingRequest:
+  httpapi.ConfirmBookingRequest:
+    properties:
+      hold_id:
+        example: 12
+        type: integer
+    type: object
+  httpapi.CreateHoldRequest:
     properties:
       seat_id:
         example: 7
@@ -40,6 +49,50 @@ definitions:
     properties:
       error:
         $ref: '#/definitions/httpapi.ErrorBody'
+    type: object
+  httpapi.HoldResponse:
+    properties:
+      expires_at:
+        example: "2026-11-07T10:05:00Z"
+        type: string
+      hold_id:
+        example: 12
+        type: integer
+      seat_id:
+        example: 7
+        type: integer
+      seconds_left:
+        example: 300
+        type: integer
+      show_id:
+        example: 1
+        type: integer
+      status:
+        enum:
+        - ACTIVE
+        - CONSUMED
+        - RELEASED
+        - EXPIRED
+        example: ACTIVE
+        type: string
+      user_id:
+        example: user-42
+        type: string
+    type: object
+  httpapi.ReadinessResponse:
+    properties:
+      postgres:
+        enum:
+        - up
+        - down
+        example: up
+        type: string
+      redis:
+        enum:
+        - up
+        - down
+        example: up
+        type: string
     type: object
   httpapi.SeatMapResponse:
     properties:
@@ -65,6 +118,7 @@ definitions:
       status:
         enum:
         - AVAILABLE
+        - HELD
         - BOOKED
         example: AVAILABLE
         type: string
@@ -120,19 +174,20 @@ paths:
       - health
   /readyz:
     get:
-      description: Returns 200 only if PostgreSQL answers a ping within 1 second,
-        otherwise 503.
+      description: |-
+        Reports Postgres and Redis. Returns 200 whenever Postgres answers within 1s,
+        even if Redis is down; returns 503 only when Postgres is down.
       produces:
       - application/json
       responses:
         "200":
           description: OK
           schema:
-            $ref: '#/definitions/httpapi.StatusResponse'
+            $ref: '#/definitions/httpapi.ReadinessResponse'
         "503":
           description: Service Unavailable
           schema:
-            $ref: '#/definitions/httpapi.StatusResponse'
+            $ref: '#/definitions/httpapi.ReadinessResponse'
       summary: Readiness check
       tags:
       - health
@@ -141,20 +196,21 @@ paths:
       consumes:
       - application/json
       description: |-
-        Books one seat directly (no holds in Phase 1). If several users book the
-        same seat at once, exactly one gets 201 and the rest get 409.
+        Turns the user's active hold into a booking. Uses PostgreSQL only, so it still
+        works while Redis is down. Of several concurrent confirms of one hold, exactly
+        one gets 201 and the rest get 409 HOLD_ALREADY_USED.
       parameters:
-      - description: Who is booking
+      - description: Owner of the hold
         in: header
         name: X-User-ID
         required: true
         type: string
-      - description: Seat to book
+      - description: Hold to confirm
         in: body
         name: request
         required: true
         schema:
-          $ref: '#/definitions/httpapi.CreateBookingRequest'
+          $ref: '#/definitions/httpapi.ConfirmBookingRequest'
       produces:
       - application/json
       responses:
@@ -167,18 +223,26 @@ paths:
           schema:
             $ref: '#/definitions/httpapi.ErrorResponse'
         "404":
-          description: Show or seat not found
+          description: HOLD_NOT_FOUND (also for another user's hold)
           schema:
             $ref: '#/definitions/httpapi.ErrorResponse'
         "409":
-          description: Seat already booked
+          description: HOLD_ALREADY_USED or SEAT_ALREADY_BOOKED
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "410":
+          description: HOLD_EXPIRED
           schema:
             $ref: '#/definitions/httpapi.ErrorResponse'
         "500":
           description: Internal Server Error
           schema:
             $ref: '#/definitions/httpapi.ErrorResponse'
-      summary: Book a seat
+        "503":
+          description: SERVICE_BUSY
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+      summary: Confirm a hold into a booking
       tags:
       - bookings
   /v1/bookings/{bookingID}:
@@ -208,9 +272,117 @@ paths:
           description: Internal Server Error
           schema:
             $ref: '#/definitions/httpapi.ErrorResponse'
+        "503":
+          description: Database busy
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
       summary: Get a booking
       tags:
       - bookings
+  /v1/holds:
+    post:
+      consumes:
+      - application/json
+      description: |-
+        Reserves a seat for the user for 5 minutes. Returns 201 for a new hold, or 200
+        with the same hold if this user already holds the seat (safe to retry).
+        If the seat lock (Redis) is unavailable, no hold is created: 503 LOCK_UNAVAILABLE.
+      parameters:
+      - description: Who is holding
+        in: header
+        name: X-User-ID
+        required: true
+        type: string
+      - description: Seat to hold
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/httpapi.CreateHoldRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Existing hold of this user
+          schema:
+            $ref: '#/definitions/httpapi.HoldResponse'
+        "201":
+          description: New hold
+          schema:
+            $ref: '#/definitions/httpapi.HoldResponse'
+        "400":
+          description: Bad input or missing X-User-ID
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "404":
+          description: Show or seat not found
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "409":
+          description: SEAT_HELD or SEAT_ALREADY_BOOKED
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "503":
+          description: LOCK_UNAVAILABLE or SERVICE_BUSY
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+      summary: Hold a seat
+      tags:
+      - holds
+  /v1/holds/{holdID}:
+    delete:
+      description: |-
+        Releases the user's active hold so others can take the seat. Works even when
+        Redis is down (PostgreSQL is updated; the Redis lock then expires by TTL).
+      parameters:
+      - description: Owner of the hold
+        in: header
+        name: X-User-ID
+        required: true
+        type: string
+      - description: Hold ID
+        in: path
+        name: holdID
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/httpapi.HoldResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "404":
+          description: HOLD_NOT_FOUND (also for another user's hold)
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "409":
+          description: HOLD_ALREADY_USED
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "410":
+          description: HOLD_EXPIRED
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "503":
+          description: SERVICE_BUSY
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+      summary: Cancel a hold
+      tags:
+      - holds
   /v1/shows:
     get:
       produces:
@@ -224,13 +396,18 @@ paths:
           description: Internal Server Error
           schema:
             $ref: '#/definitions/httpapi.ErrorResponse'
+        "503":
+          description: Database busy
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
       summary: List shows
       tags:
       - shows
   /v1/shows/{showID}/seats:
     get:
-      description: Every seat of the show with its price and status (AVAILABLE or
-        BOOKED).
+      description: |-
+        Every seat of the show with its price and status (AVAILABLE, HELD or BOOKED),
+        computed from PostgreSQL only.
       parameters:
       - description: Show ID
         in: path
@@ -254,6 +431,10 @@ paths:
             $ref: '#/definitions/httpapi.ErrorResponse'
         "500":
           description: Internal Server Error
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "503":
+          description: Database busy
           schema:
             $ref: '#/definitions/httpapi.ErrorResponse'
       summary: Seat map of a show

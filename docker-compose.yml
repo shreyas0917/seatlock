@@ -1,6 +1,6 @@
 # Local development stack.
 #   postgres : source of truth for shows, seats and bookings
-#   redis    : started now, but the API does NOT use it until Phase 2
+#   redis    : fast seat lock for holds (an optimisation; Postgres is the authority)
 #   api      : the SeatLock Go server
 # Values come from .env if it exists (see .env.example), otherwise the defaults after ":-".
 
@@ -41,11 +41,26 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER:-seatlock}:${POSTGRES_PASSWORD:-seatlock}@postgres:5432/${POSTGRES_DB:-seatlock}?sslmode=disable
       RUN_MIGRATIONS: "true"
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      DB_MAX_CONNS: ${DB_MAX_CONNS:-25}
+      DB_MIN_CONNS: ${DB_MIN_CONNS:-5}
+      # Inside the Compose network, Redis is reachable at host "redis".
+      REDIS_ADDR: redis:6379
+      REDIS_DIAL_TIMEOUT: ${REDIS_DIAL_TIMEOUT:-200ms}
+      REDIS_READ_TIMEOUT: ${REDIS_READ_TIMEOUT:-200ms}
+      REDIS_WRITE_TIMEOUT: ${REDIS_WRITE_TIMEOUT:-200ms}
+      HOLD_TTL: ${HOLD_TTL:-300s}
+      REDIS_LOCK_EXTRA: ${REDIS_LOCK_EXTRA:-10s}
     ports:
       - "8080:8080"
+    # The api waits for a healthy Postgres (nothing works without it), but
+    # deliberately NOT for a healthy Redis: with Redis down the api must still
+    # start and serve confirms and reads (new holds fail closed with 503).
+    # "service_started" only orders startup; it does not require health.
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_started
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:8080/healthz"]
       interval: 5s

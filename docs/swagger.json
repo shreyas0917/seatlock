@@ -30,7 +30,7 @@
         },
         "/readyz": {
             "get": {
-                "description": "Returns 200 only if PostgreSQL answers a ping within 1 second, otherwise 503.",
+                "description": "Reports Postgres and Redis. Returns 200 whenever Postgres answers within 1s,\neven if Redis is down; returns 503 only when Postgres is down.",
                 "produces": [
                     "application/json"
                 ],
@@ -42,13 +42,13 @@
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "$ref": "#/definitions/httpapi.StatusResponse"
+                            "$ref": "#/definitions/httpapi.ReadinessResponse"
                         }
                     },
                     "503": {
                         "description": "Service Unavailable",
                         "schema": {
-                            "$ref": "#/definitions/httpapi.StatusResponse"
+                            "$ref": "#/definitions/httpapi.ReadinessResponse"
                         }
                     }
                 }
@@ -56,7 +56,7 @@
         },
         "/v1/bookings": {
             "post": {
-                "description": "Books one seat directly (no holds in Phase 1). If several users book the\nsame seat at once, exactly one gets 201 and the rest get 409.",
+                "description": "Turns the user's active hold into a booking. Uses PostgreSQL only, so it still\nworks while Redis is down. Of several concurrent confirms of one hold, exactly\none gets 201 and the rest get 409 HOLD_ALREADY_USED.",
                 "consumes": [
                     "application/json"
                 ],
@@ -66,22 +66,22 @@
                 "tags": [
                     "bookings"
                 ],
-                "summary": "Book a seat",
+                "summary": "Confirm a hold into a booking",
                 "parameters": [
                     {
                         "type": "string",
-                        "description": "Who is booking",
+                        "description": "Owner of the hold",
                         "name": "X-User-ID",
                         "in": "header",
                         "required": true
                     },
                     {
-                        "description": "Seat to book",
+                        "description": "Hold to confirm",
                         "name": "request",
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/httpapi.CreateBookingRequest"
+                            "$ref": "#/definitions/httpapi.ConfirmBookingRequest"
                         }
                     }
                 ],
@@ -99,19 +99,31 @@
                         }
                     },
                     "404": {
-                        "description": "Show or seat not found",
+                        "description": "HOLD_NOT_FOUND (also for another user's hold)",
                         "schema": {
                             "$ref": "#/definitions/httpapi.ErrorResponse"
                         }
                     },
                     "409": {
-                        "description": "Seat already booked",
+                        "description": "HOLD_ALREADY_USED or SEAT_ALREADY_BOOKED",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    },
+                    "410": {
+                        "description": "HOLD_EXPIRED",
                         "schema": {
                             "$ref": "#/definitions/httpapi.ErrorResponse"
                         }
                     },
                     "500": {
                         "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "SERVICE_BUSY",
                         "schema": {
                             "$ref": "#/definitions/httpapi.ErrorResponse"
                         }
@@ -161,6 +173,161 @@
                         "schema": {
                             "$ref": "#/definitions/httpapi.ErrorResponse"
                         }
+                    },
+                    "503": {
+                        "description": "Database busy",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/holds": {
+            "post": {
+                "description": "Reserves a seat for the user for 5 minutes. Returns 201 for a new hold, or 200\nwith the same hold if this user already holds the seat (safe to retry).\nIf the seat lock (Redis) is unavailable, no hold is created: 503 LOCK_UNAVAILABLE.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "holds"
+                ],
+                "summary": "Hold a seat",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Who is holding",
+                        "name": "X-User-ID",
+                        "in": "header",
+                        "required": true
+                    },
+                    {
+                        "description": "Seat to hold",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.CreateHoldRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Existing hold of this user",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.HoldResponse"
+                        }
+                    },
+                    "201": {
+                        "description": "New hold",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.HoldResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad input or missing X-User-ID",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Show or seat not found",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "SEAT_HELD or SEAT_ALREADY_BOOKED",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "LOCK_UNAVAILABLE or SERVICE_BUSY",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/holds/{holdID}": {
+            "delete": {
+                "description": "Releases the user's active hold so others can take the seat. Works even when\nRedis is down (PostgreSQL is updated; the Redis lock then expires by TTL).",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "holds"
+                ],
+                "summary": "Cancel a hold",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Owner of the hold",
+                        "name": "X-User-ID",
+                        "in": "header",
+                        "required": true
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Hold ID",
+                        "name": "holdID",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.HoldResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "HOLD_NOT_FOUND (also for another user's hold)",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "HOLD_ALREADY_USED",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    },
+                    "410": {
+                        "description": "HOLD_EXPIRED",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "SERVICE_BUSY",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
                     }
                 }
             }
@@ -186,13 +353,19 @@
                         "schema": {
                             "$ref": "#/definitions/httpapi.ErrorResponse"
                         }
+                    },
+                    "503": {
+                        "description": "Database busy",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
                     }
                 }
             }
         },
         "/v1/shows/{showID}/seats": {
             "get": {
-                "description": "Every seat of the show with its price and status (AVAILABLE or BOOKED).",
+                "description": "Every seat of the show with its price and status (AVAILABLE, HELD or BOOKED),\ncomputed from PostgreSQL only.",
                 "produces": [
                     "application/json"
                 ],
@@ -233,6 +406,12 @@
                         "schema": {
                             "$ref": "#/definitions/httpapi.ErrorResponse"
                         }
+                    },
+                    "503": {
+                        "description": "Database busy",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
                     }
                 }
             }
@@ -245,6 +424,10 @@
                 "created_at": {
                     "type": "string",
                     "example": "2026-11-07T10:00:00Z"
+                },
+                "hold_id": {
+                    "type": "integer",
+                    "example": 12
                 },
                 "id": {
                     "type": "integer",
@@ -264,7 +447,16 @@
                 }
             }
         },
-        "httpapi.CreateBookingRequest": {
+        "httpapi.ConfirmBookingRequest": {
+            "type": "object",
+            "properties": {
+                "hold_id": {
+                    "type": "integer",
+                    "example": 12
+                }
+            }
+        },
+        "httpapi.CreateHoldRequest": {
             "type": "object",
             "properties": {
                 "seat_id": {
@@ -295,6 +487,66 @@
             "properties": {
                 "error": {
                     "$ref": "#/definitions/httpapi.ErrorBody"
+                }
+            }
+        },
+        "httpapi.HoldResponse": {
+            "type": "object",
+            "properties": {
+                "expires_at": {
+                    "type": "string",
+                    "example": "2026-11-07T10:05:00Z"
+                },
+                "hold_id": {
+                    "type": "integer",
+                    "example": 12
+                },
+                "seat_id": {
+                    "type": "integer",
+                    "example": 7
+                },
+                "seconds_left": {
+                    "type": "integer",
+                    "example": 300
+                },
+                "show_id": {
+                    "type": "integer",
+                    "example": 1
+                },
+                "status": {
+                    "type": "string",
+                    "enum": [
+                        "ACTIVE",
+                        "CONSUMED",
+                        "RELEASED",
+                        "EXPIRED"
+                    ],
+                    "example": "ACTIVE"
+                },
+                "user_id": {
+                    "type": "string",
+                    "example": "user-42"
+                }
+            }
+        },
+        "httpapi.ReadinessResponse": {
+            "type": "object",
+            "properties": {
+                "postgres": {
+                    "type": "string",
+                    "enum": [
+                        "up",
+                        "down"
+                    ],
+                    "example": "up"
+                },
+                "redis": {
+                    "type": "string",
+                    "enum": [
+                        "up",
+                        "down"
+                    ],
+                    "example": "up"
                 }
             }
         },
@@ -332,6 +584,7 @@
                     "type": "string",
                     "enum": [
                         "AVAILABLE",
+                        "HELD",
                         "BOOKED"
                     ],
                     "example": "AVAILABLE"
