@@ -96,8 +96,18 @@ correctness_checks() {
   if [ "$mode" = "atleast" ]; then
     if [ "$db_bookings" -ge "${k6_bookings:-0}" ]; then pass "bookings in Postgres ($db_bookings) >= bookings k6 saw ($k6_bookings)"
     else fail "bookings in Postgres $db_bookings < bookings k6 saw $k6_bookings"; fi
-  elif [ "$db_bookings" = "$k6_bookings" ]; then pass "bookings in Postgres ($db_bookings) == bookings k6 saw ($k6_bookings)"
-  else fail "bookings in Postgres $db_bookings != bookings k6 saw $k6_bookings"; fi
+  else
+    # A confirm answered 504 PAYMENT_PENDING has an UNKNOWN outcome for the
+    # client; the payment is resolved later (Tx B retry or the reconciler)
+    # and may well become a booking. So Postgres may hold up to that many
+    # bookings more than k6 saw, never fewer, never more than that.
+    c504="$(result_get "$run.result.json" counters.confirm_504)"
+    extra=$((db_bookings - ${k6_bookings:-0}))
+    if [ "$extra" -eq 0 ]; then pass "bookings in Postgres ($db_bookings) == bookings k6 saw ($k6_bookings)"
+    elif [ "$extra" -gt 0 ] && [ "$extra" -le "${c504:-0}" ]; then
+      pass "bookings in Postgres ($db_bookings) == bookings k6 saw ($k6_bookings) + $extra of the ${c504} confirms answered 504 PAYMENT_PENDING, resolved later"
+    else fail "bookings in Postgres $db_bookings vs bookings k6 saw $k6_bookings (confirms answered 504: ${c504:-0})"; fi
+  fi
   if [ -n "$show" ]; then
     expect_sql "SELECT COUNT(*) FROM bookings b JOIN shows s ON s.id = b.show_id WHERE s.title = '$show'" "$want" "bookings on '$show'"
   fi
