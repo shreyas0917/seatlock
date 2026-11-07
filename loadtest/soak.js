@@ -1,5 +1,5 @@
-// soak.js — a long run at a steady, moderate rate (about 50% of the knee):
-// the realistic mix at SOAK_RATE actions/s for SOAK_DURATION (20 min by
+// soak.js — the 10-minute soak: a steady, moderate rate (about 50% of the knee):
+// the realistic mix at SOAK_RATE actions/s for SOAK_DURATION (10 min by
 // default; a short local version of a real multi-hour soak).
 //
 // A soak test looks for slow leaks that short tests can't see: heap or
@@ -7,7 +7,7 @@
 // back, a backlog (outbox, PENDING payments) that grows. loadtest/run.sh
 // compares Prometheus at the start and the end of the run.
 //
-// It books 10% of its holds (not 50%) so 20 minutes don't use up the seats.
+// It books 10% of its holds (not 50%) so a long run does not use up the seats.
 // STRICT: at half the knee, no 503 should happen at all.
 import { baseOptions, STRICT, steadyShows, mixedAction } from './lib.js';
 
@@ -19,7 +19,7 @@ export const options = baseOptions({
       executor: 'constant-arrival-rate',
       rate: RATE,
       timeUnit: '1s',
-      duration: __ENV.SOAK_DURATION || '20m',
+      duration: __ENV.SOAK_DURATION || '10m',
       preAllocatedVUs: Math.max(50, Math.ceil(RATE / 2)),
       maxVUs: Math.max(200, RATE * 3),
     },

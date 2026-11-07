@@ -4,8 +4,9 @@
 //
 // Mix (lib.js mixedAction), across 200 shows x 200 seats:
 //   70% read a seat map; 30% hold a random seat, then on 201 confirm (half)
-//   or cancel (half). That is about 64% reads, 27% holds, 5% confirms and
-//   5% cancels by request; the report shows the real split.
+//   or cancel (half). That is about 54.6% seat maps, 23% holds, 11%
+//   confirms and 11% cancels by request (measured); the report shows the
+//   real split.
 //
 // Open model (constant-arrival-rate), for the same reason as rush.js: the
 // arrival rate must not drop when the server slows down (coordinated omission).

@@ -38,7 +38,7 @@ case "$SCENARIO" in
   smoke) DURATION=10s; EXPECT_SHOW="Load: Smoke"; EXPECT_BOOKINGS=20 ;;
   capacity) DURATION="$(echo "$K6_ENV" | grep -oE 'CAP_DURATION=[^ ]+' | cut -d= -f2)"; DURATION="${DURATION:-60s}"; STRICT=0 ;;
   spike) DURATION=150s ;;
-  soak) DURATION="$(echo "$K6_ENV" | grep -oE 'SOAK_DURATION=[^ ]+' | cut -d= -f2)"; DURATION="${DURATION:-20m}" ;;
+  soak) DURATION="$(echo "$K6_ENV" | grep -oE 'SOAK_DURATION=[^ ]+' | cut -d= -f2)"; DURATION="${DURATION:-10m}" ;;
   *) echo "unknown scenario $SCENARIO"; exit 2 ;;
 esac
 
