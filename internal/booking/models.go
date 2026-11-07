@@ -39,6 +39,7 @@ type SeatStatus string
 
 const (
 	SeatAvailable SeatStatus = "AVAILABLE"
+	SeatHeld      SeatStatus = "HELD" // an ACTIVE, unexpired hold exists
 	SeatBooked    SeatStatus = "BOOKED"
 )
 
@@ -54,6 +55,7 @@ type Booking struct {
 	ShowID    int64
 	SeatID    int64
 	UserID    string
+	HoldID    int64 // the hold this booking was confirmed from
 	CreatedAt time.Time
 }
 
@@ -62,4 +64,43 @@ type BookSeatInput struct {
 	UserID string
 	ShowID int64
 	SeatID int64
+}
+
+// HoldStatus is the lifecycle state of a hold (see the CHECK constraint in
+// db/migrations/0002_holds.up.sql).
+type HoldStatus string
+
+const (
+	HoldActive   HoldStatus = "ACTIVE"   // seat reserved until ExpiresAt
+	HoldConsumed HoldStatus = "CONSUMED" // confirmed into a booking
+	HoldReleased HoldStatus = "RELEASED" // cancelled by the user
+	HoldExpired  HoldStatus = "EXPIRED"  // ran out of time
+)
+
+// Hold reserves a seat for one user for a short time (HOLD_TTL), so they can
+// confirm without someone else taking the seat.
+type Hold struct {
+	ID        int64
+	ShowID    int64
+	SeatID    int64
+	UserID    string
+	Status    HoldStatus
+	ExpiresAt time.Time
+	CreatedAt time.Time
+	// SecondsLeft is computed by PostgreSQL (expires_at - NOW()), so it uses
+	// the database clock like every other expiry decision.
+	SecondsLeft int64
+}
+
+// HoldSeatInput is what a client sends to hold a seat.
+type HoldSeatInput struct {
+	UserID string
+	ShowID int64
+	SeatID int64
+}
+
+// ConfirmInput is what a client sends to turn a hold into a booking.
+type ConfirmInput struct {
+	UserID string
+	HoldID int64
 }

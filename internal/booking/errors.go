@@ -41,6 +41,22 @@ var (
 	// lock, we refuse the hold (fail closed). Mapped to 503 LOCK_UNAVAILABLE.
 	ErrLockUnavailable = errors.New("seat lock unavailable")
 
+	// ErrSeatHeld: another user holds this seat right now (Redis said so, or
+	// PostgreSQL has an ACTIVE hold for it). Mapped to 409 SEAT_HELD.
+	ErrSeatHeld = errors.New("seat is held by another user")
+
+	// ErrHoldNotFound: no such hold, OR it belongs to another user (we do not
+	// reveal which). Mapped to 404 HOLD_NOT_FOUND.
+	ErrHoldNotFound = errors.New("hold not found")
+
+	// ErrHoldAlreadyUsed: the hold was already confirmed into a booking.
+	// Mapped to 409 HOLD_ALREADY_USED.
+	ErrHoldAlreadyUsed = errors.New("hold already used")
+
+	// ErrHoldExpired: the hold ran out of time or was cancelled; it can no
+	// longer be confirmed. Mapped to 410 HOLD_EXPIRED.
+	ErrHoldExpired = errors.New("hold expired")
+
 	// ErrSeatAlreadyBooked: someone else already booked this seat. Produced
 	// when PostgreSQL rejects the insert with a unique-constraint violation
 	// (error code 23505) on bookings_show_seat_unique.

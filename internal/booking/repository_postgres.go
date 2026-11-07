@@ -1,9 +1,13 @@
-// repository_postgres.go is the ONLY place in SeatLock that talks SQL.
+// repository_postgres.go (with repository_holds.go) is the ONLY place in
+// SeatLock that talks SQL.
 //
 // Where it fits: booking.Service calls these methods through the Repository
-// interface (service.go). Each method runs one hand-written query through the
+// interface (service.go). Each method runs hand-written queries through the
 // shared pgx pool and converts database results and errors into domain types
-// and domain errors. Raw database errors never leave this file unwrapped.
+// and domain errors. Raw database errors never leave these files unwrapped.
+//
+// This file: shows, seats, bookings and the shared error helpers.
+// repository_holds.go: the hold / confirm / release transactions.
 package booking
 
 import (
@@ -24,11 +28,13 @@ const (
 	pgForeignKeyViolation = "23503" // a FOREIGN KEY constraint rejected the row
 )
 
-// Constraint names from db/migrations/0001_init.up.sql.
+// Constraint and index names from db/migrations/.
 const (
 	constraintBookingsShowSeatUnique = "bookings_show_seat_unique"
 	constraintBookingsSeatFK         = "bookings_seat_fk"
+	constraintBookingsHoldUnique     = "bookings_hold_unique"
 	constraintHoldsSeatFK            = "holds_seat_fk"
+	constraintHoldsOneActivePerSeat  = "holds_one_active_per_seat"
 )
 
 // defaultQueryTimeout caps how long any single query may take. If Postgres is
@@ -146,20 +152,33 @@ func (r *PostgresRepository) GetSeat(ctx context.Context, seatID int64) (Seat, e
 	return s, nil
 }
 
-// ListSeatsWithStatus returns every seat of a show and whether it is booked.
+// ListSeatsWithStatus returns every seat of a show as AVAILABLE, HELD or BOOKED.
 //
-// LEFT JOIN keeps every seat, even those with no matching booking; for those,
-// b.id is NULL and the seat is AVAILABLE. The join uses the
-// bookings_show_seat_unique index, so it stays fast.
+// The status comes from PostgreSQL ONLY, never from Redis: Postgres is the
+// authority, and Redis may have lost keys or hold stale ones.
+//
+// LEFT JOIN keeps every seat, even those with no matching row; for those the
+// joined id is NULL. A seat is HELD only if its hold is ACTIVE *and* not past
+// expires_at by the database clock: a hold that expired but was not yet marked
+// EXPIRED (that happens lazily, on the next hold attempt) shows as AVAILABLE.
+// Both joins use indexes: bookings_show_seat_unique and the partial index
+// holds_one_active_per_seat (which also guarantees at most one hold row per
+// seat, so the join cannot duplicate seats).
 func (r *PostgresRepository) ListSeatsWithStatus(ctx context.Context, showID int64) ([]SeatWithStatus, error) {
 	ctx, cancel := context.WithTimeout(ctx, r.queryTimeout)
 	defer cancel()
 
 	rows, err := r.pool.Query(ctx, `
 		SELECT s.id, s.show_id, s.seat_label, s.price_paise,
-		       CASE WHEN b.id IS NULL THEN 'AVAILABLE' ELSE 'BOOKED' END AS status
+		       CASE
+		           WHEN b.id IS NOT NULL THEN 'BOOKED'
+		           WHEN h.id IS NOT NULL THEN 'HELD'
+		           ELSE 'AVAILABLE'
+		       END AS status
 		FROM seats s
 		LEFT JOIN bookings b ON b.show_id = s.show_id AND b.seat_id = s.id
+		LEFT JOIN holds h    ON h.show_id = s.show_id AND h.seat_id = s.id
+		                    AND h.status = 'ACTIVE' AND h.expires_at > NOW()
 		WHERE s.show_id = $1
 		ORDER BY s.id`, showID)
 	if err != nil {
@@ -219,9 +238,9 @@ func (r *PostgresRepository) CreateBooking(ctx context.Context, in BookSeatInput
 	err = tx.QueryRow(ctx, `
 		INSERT INTO bookings (show_id, seat_id, user_id, hold_id)
 		VALUES ($1, $2, $3, $4)
-		RETURNING id, show_id, seat_id, user_id, created_at`,
+		RETURNING id, show_id, seat_id, user_id, hold_id, created_at`,
 		in.ShowID, in.SeatID, in.UserID, holdID).
-		Scan(&b.ID, &b.ShowID, &b.SeatID, &b.UserID, &b.CreatedAt)
+		Scan(&b.ID, &b.ShowID, &b.SeatID, &b.UserID, &b.HoldID, &b.CreatedAt)
 	if err != nil {
 		return Booking{}, mapInsertBookingError(err)
 	}
@@ -243,6 +262,10 @@ func mapInsertBookingError(err error) error {
 		switch {
 		case pgErr.Code == pgUniqueViolation && pgErr.ConstraintName == constraintBookingsShowSeatUnique:
 			return ErrSeatAlreadyBooked
+		case pgErr.Code == pgUniqueViolation && pgErr.ConstraintName == constraintBookingsHoldUnique:
+			// A second booking from the same hold. FOR UPDATE in ConfirmHold
+			// prevents this; the constraint is the backstop.
+			return ErrHoldAlreadyUsed
 		case pgErr.Code == pgForeignKeyViolation &&
 			(pgErr.ConstraintName == constraintBookingsSeatFK || pgErr.ConstraintName == constraintHoldsSeatFK):
 			// The service already checks this; the database check is the backstop.
@@ -259,10 +282,10 @@ func (r *PostgresRepository) GetBooking(ctx context.Context, bookingID int64) (B
 
 	var b Booking
 	err := r.pool.QueryRow(ctx, `
-		SELECT id, show_id, seat_id, user_id, created_at
+		SELECT id, show_id, seat_id, user_id, hold_id, created_at
 		FROM bookings
 		WHERE id = $1`, bookingID).
-		Scan(&b.ID, &b.ShowID, &b.SeatID, &b.UserID, &b.CreatedAt)
+		Scan(&b.ID, &b.ShowID, &b.SeatID, &b.UserID, &b.HoldID, &b.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Booking{}, ErrBookingNotFound
 	}
