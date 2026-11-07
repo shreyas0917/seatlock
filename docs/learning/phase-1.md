@@ -1,5 +1,7 @@
 # Phase 1 study notes: basic booking API
 
+> **Note (Phase 2):** direct booking (`POST /v1/bookings` with `show_id` + `seat_id`) was replaced by hold → confirm. `POST /v1/bookings` now takes a `hold_id`. Everything below about the UNIQUE constraint and 23505 still applies; it is still the final safety net. See [phase-2.md](phase-2.md).
+
 Goal of Phase 1: a booking API where **one seat can never be booked twice**, even when many requests arrive at the same moment, and a test that **proves** it.
 
 ---
