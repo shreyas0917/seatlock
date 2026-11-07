@@ -19,6 +19,7 @@ import (
 	"os"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -253,7 +254,34 @@ func main() {
 	duration := flag.Duration("duration", 0, "active duration of the scenario (for RPS), e.g. 10s")
 	median := flag.Bool("median", false, "aggregate several .result.json files")
 	get := flag.String("get", "", "print one value of a .result.json, e.g. phases.recovery.endpoints.hold.p95_ms")
+	timeline := flag.String("timeline", "", "print a Prometheus timeline: -timeline http://localhost:9095 -from EPOCH -to EPOCH [-zero EPOCH] [-events FILE]")
+	from := flag.Int64("from", 0, "timeline start (unix seconds)")
+	to := flag.Int64("to", 0, "timeline end (unix seconds)")
+	zero := flag.Int64("zero", 0, "timeline: offsets are shown relative to this (default -from)")
+	eventsFile := flag.String("events", "", "timeline: file of 'EPOCH label' lines")
 	flag.Parse()
+	if *timeline != "" {
+		if *zero == 0 {
+			*zero = *from
+		}
+		events := map[int64]string{}
+		if *eventsFile != "" {
+			b, err := os.ReadFile(*eventsFile)
+			if err != nil {
+				fail(err)
+			}
+			for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+				epoch, label, ok := strings.Cut(line, " ")
+				if n, err := strconv.ParseInt(epoch, 10, 64); ok && err == nil {
+					events[n] = label
+				}
+			}
+		}
+		if err := Timeline(os.Stdout, *timeline, time.Unix(*zero, 0), time.Unix(*from, 0), time.Unix(*to, 0), 10*time.Second, events); err != nil {
+			fail(err)
+		}
+		return
+	}
 	if *get != "" && flag.NArg() == 1 {
 		b, err := os.ReadFile(flag.Arg(0))
 		if err != nil {

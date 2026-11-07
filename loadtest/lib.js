@@ -93,6 +93,8 @@ function errorCode(res) {
   }
 }
 
+let loggedUnexpected = 0; // per VU
+
 // classify records the status metrics and returns 'expected' | 'shed' | 'unexpected'.
 function classify(endpoint, res, policy) {
   const status = res.status;
@@ -128,7 +130,15 @@ function classify(endpoint, res, policy) {
   } else if (endpoint === 'confirm' && status === 504 && policy.accept504) {
     verdict = 'expected';
   }
-  if (verdict === 'unexpected') unexpectedStatus.add(1, { endpoint, status: String(status) });
+  if (verdict === 'unexpected') {
+    unexpectedStatus.add(1, { endpoint, status: String(status) });
+    // The first few per VU go to the k6 log WITH their error code, so a
+    // report can say exactly what users saw (not just "a 409").
+    if (loggedUnexpected < 3) {
+      loggedUnexpected++;
+      console.warn(`unexpected: ${endpoint} -> ${status} ${code || '(no code)'} ${res.error || ''}`);
+    }
+  }
   return verdict;
 }
 
