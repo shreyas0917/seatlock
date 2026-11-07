@@ -60,14 +60,31 @@ func (s *Service) HoldSeat(ctx context.Context, in HoldSeatInput) (Hold, bool, e
 	//    (it may have lost its data); CreateHold re-checks everything.
 	hold, created, err := s.repo.CreateHold(ctx, in, s.holdTTL)
 	if err != nil {
-		// We took the Redis lock but Postgres rejected the hold (or failed).
-		// Give the lock back so it does not block the seat for 310s for
-		// nothing. If the release itself fails we ignore it: the lock
-		// expires by its TTL anyway, and Postgres stays correct either way.
-		s.releaseLock(ctx, in.ShowID, in.SeatID, in.UserID)
+		// We took the Redis lock, but no hold came back. Give the lock back
+		// ONLY if Postgres DEFINITELY said no; otherwise keep it.
+		if isDefiniteHoldRejection(err) {
+			// Postgres answered and the answer was "no hold": the lock
+			// guards nothing, so release it rather than block the seat for
+			// 310s. A failed release is ignored: the TTL cleans up.
+			s.releaseLock(ctx, in.ShowID, in.SeatID, in.UserID)
+		}
+		// Any other error (ErrBusy, a dropped connection, ...) means the
+		// outcome is UNKNOWN: the COMMIT may have reached Postgres and
+		// succeeded just before our timeout fired. If we released the lock
+		// now, Redis would say "free" while Postgres holds the seat for this
+		// user. Still safe (Postgres rejects others), but the lock would stop
+		// doing its job. So we keep it and let its TTL expire it.
 		return Hold{}, false, err
 	}
 	return hold, created, nil
+}
+
+// isDefiniteHoldRejection reports whether err is a business answer from
+// Postgres that guarantees NO hold was created for this request.
+func isDefiniteHoldRejection(err error) bool {
+	return errors.Is(err, ErrSeatHeld) ||
+		errors.Is(err, ErrSeatAlreadyBooked) ||
+		errors.Is(err, ErrSeatNotInShow)
 }
 
 // ConfirmBooking turns the user's active hold into a booking.

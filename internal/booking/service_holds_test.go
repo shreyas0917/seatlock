@@ -5,6 +5,7 @@ package booking
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -45,6 +46,43 @@ func TestHoldSeat_DatabaseRejects_ReleasesLock(t *testing.T) {
 
 	assert.ErrorIs(t, err, ErrSeatHeld)
 	assert.Equal(t, 1, locker.releaseCalls, "the Redis lock we took must be given back")
+}
+
+// TestHoldSeat_UnknownDatabaseOutcome_KeepsLock: when Postgres times out we
+// do not know whether the hold was committed, so the Redis lock must stay.
+func TestHoldSeat_UnknownDatabaseOutcome_KeepsLock(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{"busy (timeout)", fmt.Errorf("commit hold: %w: %w", ErrBusy, context.DeadlineExceeded)},
+		{"unexpected error", errors.New("conn closed")},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, repo, locker := newTestService()
+			repo.createHoldErr = tc.err
+
+			_, _, err := svc.HoldSeat(context.Background(), HoldSeatInput{UserID: "alice", ShowID: 1, SeatID: 1})
+
+			assert.ErrorIs(t, err, tc.err)
+			assert.Zero(t, locker.releaseCalls, "an unknown outcome must NOT release the lock")
+		})
+	}
+}
+
+func TestHoldSeat_DefiniteRejections_ReleaseLock(t *testing.T) {
+	for _, rejection := range []error{ErrSeatHeld, ErrSeatAlreadyBooked, ErrSeatNotInShow} {
+		t.Run(rejection.Error(), func(t *testing.T) {
+			svc, repo, locker := newTestService()
+			repo.createHoldErr = rejection
+
+			_, _, err := svc.HoldSeat(context.Background(), HoldSeatInput{UserID: "alice", ShowID: 1, SeatID: 1})
+
+			assert.ErrorIs(t, err, rejection)
+			assert.Equal(t, 1, locker.releaseCalls)
+		})
+	}
 }
 
 func TestHoldSeat_ReleaseFailureIsIgnored(t *testing.T) {
