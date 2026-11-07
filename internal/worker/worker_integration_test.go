@@ -251,7 +251,7 @@ func TestReconciler_ChargeSucceeded_HoldValid_Books(t *testing.T) {
 
 	res := e.runOnce(e.reconciler(e.svc, 50))
 
-	assert.Equal(t, worker.Result{Claimed: 1, Succeeded: 1}, res)
+	assert.Equal(t, worker.Result{Claimed: 1, Succeeded: 1, Outcomes: map[string]int{"booked": 1}}, res)
 	assert.Equal(t, "SUCCEEDED", e.str(`SELECT status FROM payments WHERE hold_id = $1`, h.ID))
 	assert.Equal(t, 1, e.count(`SELECT COUNT(*) FROM bookings WHERE hold_id = $1`, h.ID))
 	st := e.mock.Stats()
@@ -355,7 +355,7 @@ func TestReconciler_GatewayDown_StaysPending(t *testing.T) {
 
 	res := e.runOnce(e.reconciler(down, 50))
 
-	assert.Equal(t, worker.Result{Claimed: 1, Failed: 1}, res)
+	assert.Equal(t, worker.Result{Claimed: 1, Failed: 1, Outcomes: map[string]int{"still_pending": 1}}, res)
 	var status, lastError string
 	var attempts int
 	var later bool

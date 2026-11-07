@@ -66,6 +66,7 @@ func (j *Reconciler) RunOnce(ctx context.Context) (Result, error) {
 		outcome, err := j.Actions.ReconcilePayment(ctx, p)
 		attrs := []any{"job", j.Name(), "payment_id", p.ID, "charge_key", p.ChargeKey,
 			"outcome", string(outcome), "duration_ms", time.Since(start).Milliseconds()}
+		res.add(string(outcome))
 		if err != nil {
 			res.Failed++
 			j.Logger.Warn("reconcile failed; will retry with backoff", append(attrs, "error", err.Error())...)
@@ -106,6 +107,7 @@ func (j *OutboxDrainer) RunOnce(ctx context.Context) (Result, error) {
 			"attempt", row.Attempts, "duration_ms", time.Since(start).Milliseconds()}
 		if err == nil {
 			res.Succeeded++
+			res.add("done")
 			j.Logger.Info("outbox row done", append(attrs, "outcome", "done")...)
 			continue
 		}
@@ -114,14 +116,17 @@ func (j *OutboxDrainer) RunOnce(ctx context.Context) (Result, error) {
 		status, recErr := j.Store.FailClaimedOutbox(ctx, row.ID, err.Error())
 		switch {
 		case recErr != nil:
+			res.add("retry")
 			// Could not even record the failure: the claim lease expires and
 			// the row is retried then.
 			j.Logger.Error("could not record outbox failure",
 				append(attrs, "error", err.Error(), "record_error", recErr.Error())...)
 		case status == booking.OutboxFailed:
+			res.add("failed")
 			j.Logger.Error("outbox row dead-lettered after max attempts; requeue by hand with `make outbox-retry ID=<id>`",
 				append(attrs, "outcome", "failed", "error", err.Error())...)
 		default:
+			res.add("retry")
 			j.Logger.Warn("outbox row failed; will retry with backoff",
 				append(attrs, "outcome", "retry", "error", err.Error())...)
 		}
@@ -151,7 +156,11 @@ func (j *HoldExpirer) RunOnce(ctx context.Context) (Result, error) {
 		j.Logger.Info("hold expired",
 			"job", j.Name(), "hold_id", h.HoldID, "seat_id", h.SeatID, "outbox_id", h.OutboxID, "outcome", "expired")
 	}
-	return Result{Claimed: len(expired), Succeeded: len(expired)}, nil
+	res := Result{Claimed: len(expired), Succeeded: len(expired)}
+	for range expired {
+		res.add("expired")
+	}
+	return res, nil
 }
 
 // --------------------------------------------------------------- key cleanup
@@ -184,8 +193,10 @@ func (j *KeyCleanup) RunOnce(ctx context.Context) (Result, error) {
 			break
 		}
 	}
+	res := Result{Claimed: int(total), Succeeded: int(total)}
 	if total > 0 {
 		j.Logger.Info("idempotency keys deleted", "job", j.Name(), "deleted", total, "outcome", "deleted")
+		res.Outcomes = map[string]int{"deleted": int(total)}
 	}
-	return Result{Claimed: int(total), Succeeded: int(total)}, nil
+	return res, nil
 }

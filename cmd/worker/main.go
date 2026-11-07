@@ -14,16 +14,20 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/shreyas0917/seatlock/internal/booking"
 	"github.com/shreyas0917/seatlock/internal/config"
 	"github.com/shreyas0917/seatlock/internal/db"
 	"github.com/shreyas0917/seatlock/internal/idempotency"
 	"github.com/shreyas0917/seatlock/internal/lock"
+	"github.com/shreyas0917/seatlock/internal/metrics"
 	"github.com/shreyas0917/seatlock/internal/payment"
 	"github.com/shreyas0917/seatlock/internal/worker"
 )
@@ -63,6 +67,10 @@ func run() error {
 	}
 	defer pool.Close()
 
+	// Metrics, created first so every component is wired before the jobs start.
+	m := metrics.NewWorker()
+	m.RegisterDBPool(pool)
+
 	redisClient := lock.NewClient(lock.Options{
 		Addr:         cfg.RedisAddr,
 		DialTimeout:  cfg.RedisDialTimeout,
@@ -72,11 +80,13 @@ func run() error {
 		MinIdleConns: int(cfg.RedisMinIdleConns),
 	})
 	defer redisClient.Close()
-	locker := lock.NewRedisLocker(redisClient, cfg.HoldTTL, cfg.RedisLockExtra)
+	m.RegisterRedisPool(redisClient)
+	locker := lock.NewRedisLocker(redisClient, cfg.HoldTTL, cfg.RedisLockExtra).WithObserver(m.ObserveLockOp)
 
 	repo := booking.NewPostgresRepository(pool, cfg.DBQueryTimeout)
 	repo.SetLimits(booking.Limits{PendingHoldMax: cfg.PendingHoldMax, OutboxMaxAttempts: int(cfg.OutboxMaxAttempts)})
-	svc := booking.NewService(repo, locker, payment.NewClient(cfg.PaymentURL, cfg.PaymentTimeout), cfg.HoldTTL)
+	gateway := payment.NewInstrumented(payment.NewClient(cfg.PaymentURL, cfg.PaymentTimeout), m)
+	svc := booking.NewService(repo, locker, gateway, cfg.HoldTTL)
 	keys := idempotency.NewStore(pool, cfg.IdempotencyLease, cfg.DBQueryTimeout)
 	batch := int(cfg.WorkerBatchSize)
 
@@ -95,7 +105,26 @@ func run() error {
 	logger.Info("worker starting",
 		"reconcile_after", cfg.ReconcileAfter.String(), "pending_hold_max", cfg.PendingHoldMax.String(),
 		"outbox_max_attempts", cfg.OutboxMaxAttempts, "batch_size", batch)
-	worker.Run(ctx, jobs, logger) // returns after SIGTERM, once running batches finished
+	// /metrics on a separate internal port (default :9092), like the API.
+	metricsAddr := cfg.MetricsAddr
+	if metricsAddr == "" {
+		metricsAddr = ":9092"
+	}
+	metricsMux := http.NewServeMux()
+	metricsMux.Handle("GET /metrics", m.Handler())
+	metricsServer := &http.Server{Addr: metricsAddr, Handler: metricsMux, ReadHeaderTimeout: 5 * time.Second}
+	go func() {
+		logger.Info("metrics server listening", "addr", metricsAddr)
+		if err := metricsServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Error("metrics server stopped", "error", err.Error())
+		}
+	}()
+
+	worker.Run(ctx, jobs, logger, m) // returns after SIGTERM, once running batches finished
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = metricsServer.Shutdown(shutdownCtx)
 	logger.Info("worker stopped cleanly")
 	return nil
 }

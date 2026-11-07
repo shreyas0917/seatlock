@@ -4,13 +4,17 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
+
+	"github.com/shreyas0917/seatlock/internal/metrics"
 )
 
 // countingJob counts its runs; each run takes `work` and records whether its
@@ -30,7 +34,7 @@ func (j *countingJob) RunOnce(ctx context.Context) (Result, error) {
 	case <-ctx.Done():
 		j.interrupted.Add(1)
 	}
-	return Result{Claimed: 1, Succeeded: 1}, nil
+	return Result{Claimed: 1, Succeeded: 1, Outcomes: map[string]int{"done": 1}}, nil
 }
 
 func TestRun_RepeatsJobs(t *testing.T) {
@@ -38,9 +42,36 @@ func TestRun_RepeatsJobs(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 
-	Run(ctx, []Scheduled{{Job: job, Interval: 20 * time.Millisecond}}, slog.New(slog.NewJSONHandler(io.Discard, nil)))
+	m := metrics.NewWorker()
+	Run(ctx, []Scheduled{{Job: job, Interval: 20 * time.Millisecond}}, slog.New(slog.NewJSONHandler(io.Discard, nil)), m)
 
 	assert.GreaterOrEqual(t, job.runs.Load(), int32(5))
+	runs := testutil.ToFloat64(m.WorkerRuns.WithLabelValues("counting", "ok"))
+	assert.Equal(t, float64(job.runs.Load()), runs, "every run is counted")
+	assert.Equal(t, runs, testutil.ToFloat64(m.WorkerRows.WithLabelValues("counting", "done")), "row outcomes are counted")
+	assert.InDelta(t, float64(time.Now().Unix()), testutil.ToFloat64(m.WorkerLastSuccess.WithLabelValues("counting")), 5)
+	assert.Equal(t, 0.02, testutil.ToFloat64(m.WorkerInterval.WithLabelValues("counting")))
+}
+
+// A failing run is counted as an error and does NOT move last-success
+// (which is what makes the WorkerJobStalled alert fire).
+func TestRun_FailedRunDoesNotCountAsSuccess(t *testing.T) {
+	job := &failingJob{}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	m := metrics.NewWorker()
+
+	Run(ctx, []Scheduled{{Job: job, Interval: 10 * time.Millisecond}}, slog.New(slog.NewJSONHandler(io.Discard, nil)), m)
+
+	assert.Greater(t, testutil.ToFloat64(m.WorkerRuns.WithLabelValues("failing", "error")), 0.0)
+	assert.Zero(t, testutil.ToFloat64(m.WorkerLastSuccess.WithLabelValues("failing")))
+}
+
+type failingJob struct{}
+
+func (failingJob) Name() string { return "failing" }
+func (failingJob) RunOnce(ctx context.Context) (Result, error) {
+	return Result{}, errors.New("database unreachable")
 }
 
 // TestRun_ShutdownFinishesTheCurrentBatch: SIGTERM arrives in the middle of a
@@ -50,7 +81,7 @@ func TestRun_ShutdownFinishesTheCurrentBatch(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		Run(ctx, []Scheduled{{Job: job, Interval: 10 * time.Millisecond}}, slog.New(slog.NewJSONHandler(io.Discard, nil)))
+		Run(ctx, []Scheduled{{Job: job, Interval: 10 * time.Millisecond}}, slog.New(slog.NewJSONHandler(io.Discard, nil)), nil)
 		close(done)
 	}()
 

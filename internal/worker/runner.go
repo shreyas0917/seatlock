@@ -24,14 +24,27 @@ import (
 	"math/rand"
 	"sync"
 	"time"
+
+	"github.com/shreyas0917/seatlock/internal/metrics"
 )
 
-// Result is what one RunOnce did. Counts are kept separate so Phase 5 can
-// turn them into metrics directly.
+// Result is what one RunOnce did. The runner turns it into metrics.
 type Result struct {
 	Claimed   int // rows picked up
 	Succeeded int // rows finished (or acted on) without error
 	Failed    int // rows that failed and will be retried (or were dead-lettered)
+	// Outcomes counts rows by outcome name, e.g. {"booked": 2, "abandoned": 1}
+	// (-> seatlock_worker_rows_total{worker_job,outcome}). Names come from
+	// fixed lists in code, so the label stays low-cardinality.
+	Outcomes map[string]int
+}
+
+// add records one row outcome.
+func (r *Result) add(outcome string) {
+	if r.Outcomes == nil {
+		r.Outcomes = map[string]int{}
+	}
+	r.Outcomes[outcome]++
 }
 
 // Job is one kind of background work. RunOnce processes ONE batch and
@@ -63,20 +76,28 @@ const batchTimeout = 5 * time.Minute
 // that is not cancelled by shutdown (only by batchTimeout). Stopping halfway
 // would be safe too (claims are leases that simply expire), but finishing
 // avoids leaving rows waiting a full lease for no reason.
-func Run(ctx context.Context, jobs []Scheduled, logger *slog.Logger) {
+//
+// m (may be nil) receives per-job metrics: runs, duration, row outcomes, the
+// time of the last successful run, and the configured interval.
+func Run(ctx context.Context, jobs []Scheduled, logger *slog.Logger, m *metrics.Metrics) {
 	var wg sync.WaitGroup
 	for _, s := range jobs {
 		wg.Add(1)
 		go func(s Scheduled) {
 			defer wg.Done()
-			loop(ctx, s, logger)
+			loop(ctx, s, logger, m)
 		}(s)
 	}
 	wg.Wait()
 }
 
-func loop(ctx context.Context, s Scheduled, logger *slog.Logger) {
+func loop(ctx context.Context, s Scheduled, logger *slog.Logger, m *metrics.Metrics) {
 	logger.Info("job started", "job", s.Job.Name(), "interval", s.Interval.String())
+	if m != nil {
+		// Exported so the WorkerJobStalled alert can compare "time since
+		// the last success" with 5 x THIS job's interval, in one rule.
+		m.WorkerInterval.WithLabelValues(s.Job.Name()).Set(s.Interval.Seconds())
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -90,6 +111,7 @@ func loop(ctx context.Context, s Scheduled, logger *slog.Logger) {
 		start := time.Now()
 		res, err := s.Job.RunOnce(batchCtx)
 		cancel()
+		record(m, s.Job.Name(), res, err, time.Since(start))
 
 		if err != nil {
 			logger.Error("job run failed", "job", s.Job.Name(), "error", err.Error())
@@ -100,6 +122,25 @@ func loop(ctx context.Context, s Scheduled, logger *slog.Logger) {
 				"duration_ms", time.Since(start).Milliseconds())
 		}
 	}
+}
+
+// record turns one run into metrics.
+func record(m *metrics.Metrics, job string, res Result, err error, took time.Duration) {
+	if m == nil {
+		return
+	}
+	m.WorkerDuration.WithLabelValues(job).Observe(took.Seconds())
+	for outcome, n := range res.Outcomes {
+		m.WorkerRows.WithLabelValues(job, outcome).Add(float64(n))
+	}
+	if err != nil {
+		m.WorkerRuns.WithLabelValues(job, "error").Inc()
+		return
+	}
+	m.WorkerRuns.WithLabelValues(job, "ok").Inc()
+	// "ok" means the job could DO its work (claim, query), even if some rows
+	// failed and will be retried; those show up in WorkerRows instead.
+	m.WorkerLastSuccess.WithLabelValues(job).SetToCurrentTime()
 }
 
 // jittered returns d plus or minus up to jitterFraction of d.
