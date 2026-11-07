@@ -60,6 +60,12 @@ type Config struct {
 	// RedisLockExtra is added to HoldTTL for the Redis lock's lifetime, so the
 	// Redis lock always outlives the database hold (see internal/lock).
 	RedisLockExtra time.Duration
+
+	// PaymentURL is the base URL of the payment gateway (the mock in this project).
+	PaymentURL string
+	// PaymentTimeout caps one call to the gateway. When it fires, the outcome
+	// of a charge is UNKNOWN (the payment stays PENDING, 504 to the client).
+	PaymentTimeout time.Duration
 }
 
 // Load builds a Config from environment variables, using a sensible default
@@ -96,6 +102,7 @@ func Load() (Config, error) {
 	}
 
 	cfg.RedisAddr = getEnv("REDIS_ADDR", "localhost:6379")
+	cfg.PaymentURL = getEnv("PAYMENT_URL", "http://localhost:8095")
 	if cfg.RedisPoolSize, err = getInt32("REDIS_POOL_SIZE", 10); err != nil {
 		return Config{}, err
 	}
@@ -117,6 +124,7 @@ func Load() (Config, error) {
 		{"REDIS_WRITE_TIMEOUT", 200 * time.Millisecond, &cfg.RedisWriteTimeout},
 		{"HOLD_TTL", 300 * time.Second, &cfg.HoldTTL},
 		{"REDIS_LOCK_EXTRA", 10 * time.Second, &cfg.RedisLockExtra},
+		{"PAYMENT_TIMEOUT", 5 * time.Second, &cfg.PaymentTimeout},
 	}
 	for _, d := range durations {
 		value, err := getDuration(d.key, d.fallback)

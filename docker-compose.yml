@@ -77,6 +77,9 @@ services:
       REDIS_MIN_IDLE_CONNS: ${REDIS_MIN_IDLE_CONNS:-10}
       HOLD_TTL: ${HOLD_TTL:-300s}
       REDIS_LOCK_EXTRA: ${REDIS_LOCK_EXTRA:-10s}
+      # Inside the Compose network, the mock gateway is reachable at host "payment".
+      PAYMENT_URL: http://payment:8090
+      PAYMENT_TIMEOUT: ${PAYMENT_TIMEOUT:-5s}
     ports:
       - "8080:8080"
     # The api waits for a healthy Postgres (nothing works without it), but
