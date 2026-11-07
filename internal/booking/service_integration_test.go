@@ -93,13 +93,28 @@ func setup(t *testing.T) env {
 	rdb := lock.NewClient(lock.Options{
 		Addr: redisAddr, DB: 1,
 		DialTimeout: defaults.RedisDialTimeout, ReadTimeout: defaults.RedisReadTimeout, WriteTimeout: defaults.RedisWriteTimeout,
+		PoolSize: int(defaults.RedisPoolSize), MinIdleConns: int(defaults.RedisMinIdleConns),
 	})
 	t.Cleanup(func() { _ = rdb.Close() })
 	require.NoError(t, rdb.FlushDB(ctx).Err(), "is redis running? try `make up`")
+	waitForIdleConns(t, rdb, int(defaults.RedisMinIdleConns))
 
 	repo := booking.NewPostgresRepository(pool)
 	svc := booking.NewService(repo, lock.NewRedisLocker(rdb, holdTTL, lockExtra), holdTTL)
 	return env{pool: pool, redis: rdb, repo: repo, svc: svc, showID: showID, seatIDs: seatIDs}
+}
+
+// waitForIdleConns waits until the Redis client has opened its MinIdleConns
+// connections. A long-running API server is always in this state; a client
+// created a millisecond ago is not. Waiting puts the test in the same
+// steady state as production instead of measuring a cold start.
+func waitForIdleConns(t *testing.T, rdb *redis.Client, n int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for int(rdb.PoolStats().IdleConns) < n {
+		require.True(t, time.Now().Before(deadline), "redis pool never reached %d idle connections", n)
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // deadLockerService returns a Service whose Redis is unreachable

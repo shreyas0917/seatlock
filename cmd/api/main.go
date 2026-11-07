@@ -91,6 +91,8 @@ func run() error {
 		DialTimeout:  cfg.RedisDialTimeout,
 		ReadTimeout:  cfg.RedisReadTimeout,
 		WriteTimeout: cfg.RedisWriteTimeout,
+		PoolSize:     int(cfg.RedisPoolSize),
+		MinIdleConns: int(cfg.RedisMinIdleConns),
 	})
 	defer redisClient.Close()
 	locker := lock.NewRedisLocker(redisClient, cfg.HoldTTL, cfg.RedisLockExtra)

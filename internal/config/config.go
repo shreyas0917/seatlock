@@ -44,6 +44,13 @@ type Config struct {
 	RedisDialTimeout  time.Duration
 	RedisReadTimeout  time.Duration
 	RedisWriteTimeout time.Duration
+	// RedisPoolSize caps open Redis connections; RedisMinIdleConns keeps that
+	// many open even when idle. Together they keep the pool WARM: a burst of
+	// hold requests queues briefly for an already-open connection (Redis
+	// answers in ~1ms) instead of opening dozens of new TCP connections at
+	// once, whose first replies can exceed the 200ms timeouts and fail closed.
+	RedisPoolSize     int32
+	RedisMinIdleConns int32
 
 	// HoldTTL is how long a seat hold lasts in PostgreSQL (default 5 minutes).
 	HoldTTL time.Duration
@@ -86,6 +93,16 @@ func Load() (Config, error) {
 	}
 
 	cfg.RedisAddr = getEnv("REDIS_ADDR", "localhost:6379")
+	if cfg.RedisPoolSize, err = getInt32("REDIS_POOL_SIZE", 10); err != nil {
+		return Config{}, err
+	}
+	if cfg.RedisMinIdleConns, err = getInt32("REDIS_MIN_IDLE_CONNS", 10); err != nil {
+		return Config{}, err
+	}
+	if cfg.RedisPoolSize < 1 || cfg.RedisMinIdleConns < 0 || cfg.RedisMinIdleConns > cfg.RedisPoolSize {
+		return Config{}, fmt.Errorf("invalid redis pool: need 0 <= REDIS_MIN_IDLE_CONNS (%d) <= REDIS_POOL_SIZE (%d) and REDIS_POOL_SIZE >= 1",
+			cfg.RedisMinIdleConns, cfg.RedisPoolSize)
+	}
 	durations := []struct {
 		key      string
 		fallback time.Duration

@@ -26,6 +26,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -69,9 +70,16 @@ func TestHTTP_ParallelHoldBurstHasNo500s(t *testing.T) {
 	rdb := lock.NewClient(lock.Options{
 		Addr: redisAddr, DB: 1,
 		DialTimeout: defaults.RedisDialTimeout, ReadTimeout: defaults.RedisReadTimeout, WriteTimeout: defaults.RedisWriteTimeout,
+		PoolSize: int(defaults.RedisPoolSize), MinIdleConns: int(defaults.RedisMinIdleConns),
 	})
 	t.Cleanup(func() { _ = rdb.Close() })
 	require.NoError(t, rdb.FlushDB(ctx).Err(), "is redis running? try `make up`")
+	// Like a long-running server: wait until the pool has its idle connections open.
+	deadline := time.Now().Add(5 * time.Second)
+	for rdb.PoolStats().IdleConns < uint32(defaults.RedisMinIdleConns) {
+		require.True(t, time.Now().Before(deadline), "redis pool never warmed up")
+		time.Sleep(10 * time.Millisecond)
+	}
 	locker := lock.NewRedisLocker(rdb, defaults.HoldTTL, defaults.RedisLockExtra)
 
 	// Fresh data: one show with one seat.

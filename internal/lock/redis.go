@@ -34,6 +34,11 @@ type Options struct {
 	DialTimeout  time.Duration
 	ReadTimeout  time.Duration
 	WriteTimeout time.Duration
+	// PoolSize caps open connections; MinIdleConns keeps that many open while
+	// idle (see config.RedisPoolSize for why both matter). Zero means the
+	// go-redis default.
+	PoolSize     int
+	MinIdleConns int
 }
 
 // NewClient creates a Redis client. It does not connect yet: go-redis opens
@@ -46,6 +51,11 @@ func NewClient(opts Options) *redis.Client {
 		DialTimeout:  opts.DialTimeout,
 		ReadTimeout:  opts.ReadTimeout,
 		WriteTimeout: opts.WriteTimeout,
+		// A small, warm pool. Waiting for a free pooled connection is
+		// bounded by go-redis's PoolTimeout (default: ReadTimeout + 1s), and
+		// a pool-wait timeout is an error like any other: fail closed.
+		PoolSize:     opts.PoolSize,
+		MinIdleConns: opts.MinIdleConns,
 		// go-redis retries failed commands 3 times by default. With Redis
 		// down that multiplies the wait before we can answer 503. We fail
 		// fast instead (-1 = no retries) and let the client retry the HTTP
