@@ -26,7 +26,7 @@ import (
 //     GetBooking ErrBookingNotFound when the row does not exist;
 //   - CreateHold returns ErrSeatHeld / ErrSeatAlreadyBooked when the seat is
 //     not free, and created=false with the existing hold for a same-user retry;
-//   - ConfirmHold and ReleaseHold return ErrHoldNotFound, ErrHoldAlreadyUsed
+//   - BeginPayment and ReleaseHold return ErrHoldNotFound, ErrHoldAlreadyUsed
 //     or ErrHoldExpired when the hold cannot be used; ReleaseHold returns
 //     ErrPaymentInProgress while the hold has a PENDING payment.
 type Repository interface {
@@ -36,22 +36,30 @@ type Repository interface {
 	ListSeatsWithStatus(ctx context.Context, showID int64) ([]SeatWithStatus, error)
 	GetBooking(ctx context.Context, bookingID int64) (Booking, error)
 	CreateHold(ctx context.Context, in HoldSeatInput, ttl time.Duration) (hold Hold, created bool, err error)
-	ConfirmHold(ctx context.Context, in ConfirmInput) (Booking, error)
 	ReleaseHold(ctx context.Context, userID string, holdID int64) (hold Hold, outboxID int64, err error)
 	MarkOutboxDone(ctx context.Context, outboxID int64) error
+
+	// Payments (repository_payments.go).
+	BeginPayment(ctx context.Context, in ConfirmInput) (payment Payment, created bool, err error)
+	CompletePayment(ctx context.Context, paymentID int64, chargeID string) (CompleteResult, error)
+	MarkPaymentDeclined(ctx context.Context, paymentID int64) error
+	MarkRefunded(ctx context.Context, paymentID, outboxID int64) (Payment, error)
+	RecordOutboxFailure(ctx context.Context, outboxID int64, failure string) error
 }
 
 // Service applies SeatLock's business rules.
 type Service struct {
 	repo    Repository
 	locker  SeatLocker
+	gateway PaymentGateway
 	holdTTL time.Duration
 }
 
 // NewService builds a Service that stores data through repo, locks seats
-// through locker (Redis in production) and creates holds lasting holdTTL.
-func NewService(repo Repository, locker SeatLocker, holdTTL time.Duration) *Service {
-	return &Service{repo: repo, locker: locker, holdTTL: holdTTL}
+// through locker (Redis in production), takes payments through gateway and
+// creates holds lasting holdTTL.
+func NewService(repo Repository, locker SeatLocker, gateway PaymentGateway, holdTTL time.Duration) *Service {
+	return &Service{repo: repo, locker: locker, gateway: gateway, holdTTL: holdTTL}
 }
 
 // ListShows returns every show.

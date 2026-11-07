@@ -60,6 +60,18 @@ func mapError(err error) httpError {
 		// 410 Gone: the hold existed, but it is gone for good. Retrying the
 		// same request will never work; the user must hold the seat again.
 		return httpError{http.StatusGone, "HOLD_EXPIRED", "this hold has expired or was cancelled"}
+	case errors.Is(err, booking.ErrPaymentInProgress):
+		return httpError{http.StatusConflict, "PAYMENT_IN_PROGRESS", "a payment for this hold is in progress; it cannot be cancelled now"}
+	case errors.Is(err, booking.ErrPaymentDeclined):
+		// 402 Payment Required: the card was declined, nothing was charged,
+		// and the hold is still valid. Retry with a NEW Idempotency-Key.
+		return httpError{http.StatusPaymentRequired, "PAYMENT_DECLINED", "the payment was declined; no money was taken"}
+	case errors.Is(err, booking.ErrPaymentPending):
+		// Checked BEFORE ErrBusy: a Tx B timeout wraps both, and the honest
+		// answer is "payment outcome unknown". 504 Gateway Timeout: retry
+		// with the SAME Idempotency-Key to learn the outcome; you will not
+		// be charged twice.
+		return httpError{http.StatusGatewayTimeout, "PAYMENT_PENDING", "the payment outcome is not known yet; retry with the same Idempotency-Key"}
 	case errors.Is(err, booking.ErrLockUnavailable):
 		// Fail closed: we could not ask the seat lock, so no new hold was
 		// created. 503 because it is temporary and the client may retry.

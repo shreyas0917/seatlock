@@ -11,6 +11,7 @@ package booking
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -36,6 +37,13 @@ type fakeRepository struct {
 	createHoldCalls int
 	// outboxDone lists the outbox rows marked DONE.
 	outboxDone []int64
+
+	payments map[int64]Payment
+	// completeErr, if set, is returned by CompletePayment (Tx B fails).
+	completeErr error
+	// expireDuringPayment makes CompletePayment act as if the hold expired
+	// while the gateway was working.
+	expireDuringPayment bool
 }
 
 // newFakeRepository returns a fake with show 1 (seats 1 and 2) and show 2 (seat 3).
@@ -52,6 +60,7 @@ func newFakeRepository() *fakeRepository {
 		},
 		bookings: map[int64]Booking{},
 		holds:    map[int64]Hold{},
+		payments: map[int64]Payment{},
 	}
 }
 
@@ -136,26 +145,88 @@ func (f *fakeRepository) CreateHold(ctx context.Context, in HoldSeatInput, ttl t
 	return h, true, nil
 }
 
-func (f *fakeRepository) ConfirmHold(ctx context.Context, in ConfirmInput) (Booking, error) {
+// --- payments: a simplified in-memory version of repository_payments.go ---
+
+func (f *fakeRepository) BeginPayment(ctx context.Context, in ConfirmInput) (Payment, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	h, ok := f.holds[in.HoldID]
 	if !ok || h.UserID != in.UserID {
-		return Booking{}, ErrHoldNotFound
+		return Payment{}, false, ErrHoldNotFound
+	}
+	for _, p := range f.payments {
+		if p.HoldID == h.ID && p.Status == PaymentPending {
+			return p, false, nil // reuse the payment in flight
+		}
 	}
 	switch h.Status {
 	case HoldConsumed:
-		return Booking{}, ErrHoldAlreadyUsed
+		return Payment{}, false, ErrHoldAlreadyUsed
 	case HoldActive:
 	default:
-		return Booking{}, ErrHoldExpired
+		return Payment{}, false, &HoldExpiredError{}
+	}
+	f.nextID++
+	p := Payment{ID: f.nextID, HoldID: h.ID, UserID: h.UserID, AmountPaise: 25000,
+		ChargeKey: fmt.Sprintf("pay-%d", f.nextID), Status: PaymentPending}
+	f.payments[p.ID] = p
+	return p, true, nil
+}
+
+func (f *fakeRepository) CompletePayment(ctx context.Context, paymentID int64, chargeID string) (CompleteResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.completeErr != nil {
+		return CompleteResult{}, f.completeErr
+	}
+	p := f.payments[paymentID]
+	h := f.holds[p.HoldID]
+	if p.Status == PaymentSucceeded {
+		for _, b := range f.bookings {
+			if b.HoldID == h.ID {
+				return CompleteResult{Kind: Booked, Booking: b, Payment: p}, nil
+			}
+		}
+	}
+	if h.Status != HoldActive || f.expireDuringPayment {
+		p.Status = PaymentRefundPending
+		p.ProviderChargeID = chargeID
+		f.payments[p.ID] = p
+		f.nextID++
+		return CompleteResult{Kind: RefundRequired, Payment: p, OutboxID: f.nextID}, nil
 	}
 	f.nextID++
 	b := Booking{ID: f.nextID, ShowID: h.ShowID, SeatID: h.SeatID, UserID: h.UserID, HoldID: h.ID, CreatedAt: time.Now()}
 	f.bookings[b.ID] = b
 	h.Status = HoldConsumed
 	f.holds[h.ID] = h
-	return b, nil
+	p.Status = PaymentSucceeded
+	p.ProviderChargeID = chargeID
+	f.payments[p.ID] = p
+	return CompleteResult{Kind: Booked, Booking: b, Payment: p}, nil
+}
+
+func (f *fakeRepository) MarkPaymentDeclined(ctx context.Context, paymentID int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	p := f.payments[paymentID]
+	p.Status = PaymentDeclined
+	f.payments[paymentID] = p
+	return nil
+}
+
+func (f *fakeRepository) MarkRefunded(ctx context.Context, paymentID, outboxID int64) (Payment, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	p := f.payments[paymentID]
+	p.Status = PaymentRefunded
+	f.payments[paymentID] = p
+	f.outboxDone = append(f.outboxDone, outboxID)
+	return p, nil
+}
+
+func (f *fakeRepository) RecordOutboxFailure(ctx context.Context, outboxID int64, failure string) error {
+	return nil
 }
 
 func (f *fakeRepository) ReleaseHold(ctx context.Context, userID string, holdID int64) (Hold, int64, error) {
@@ -215,9 +286,50 @@ func (l *fakeLocker) Release(ctx context.Context, showID, seatID int64, owner st
 // newTestService wires a Service to fresh fakes and returns all three, so a
 // test can configure the fakes and inspect what was called.
 func newTestService() (*Service, *fakeRepository, *fakeLocker) {
+	svc, repo, locker, _ := newTestServiceWithGateway()
+	return svc, repo, locker
+}
+
+// newTestServiceWithGateway also returns the fake payment gateway.
+func newTestServiceWithGateway() (*Service, *fakeRepository, *fakeLocker, *fakeGateway) {
 	repo := newFakeRepository()
 	locker := &fakeLocker{}
-	return NewService(repo, locker, 300*time.Second), repo, locker
+	gateway := &fakeGateway{}
+	return NewService(repo, locker, gateway, 300*time.Second), repo, locker, gateway
+}
+
+// fakeGateway implements PaymentGateway. chargeErr simulates "no answer",
+// decline makes every charge declined, refundErr makes refunds fail.
+type fakeGateway struct {
+	mu         sync.Mutex
+	chargeErr  error
+	decline    bool
+	refundErr  error
+	chargeKeys []string // every charge key received
+	refunds    int
+}
+
+func (g *fakeGateway) Charge(ctx context.Context, req ChargeRequest) (ChargeResult, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.chargeKeys = append(g.chargeKeys, req.IdempotencyKey)
+	if g.chargeErr != nil {
+		return ChargeResult{}, g.chargeErr
+	}
+	if g.decline {
+		return ChargeResult{ChargeID: "ch_" + req.IdempotencyKey, Status: ChargeDeclined}, nil
+	}
+	return ChargeResult{ChargeID: "ch_" + req.IdempotencyKey, Status: ChargeSucceeded}, nil
+}
+
+func (g *fakeGateway) Refund(ctx context.Context, req RefundRequest) (RefundResult, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.refundErr != nil {
+		return RefundResult{}, g.refundErr
+	}
+	g.refunds++
+	return RefundResult{RefundID: "re_" + req.IdempotencyKey}, nil
 }
 
 // bookViaHold books a seat of show 1 the only way that exists: hold, then confirm.

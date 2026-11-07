@@ -2,8 +2,8 @@
 // hold into a booking, and release (cancel) a hold.
 //
 // Where it fits: Service.HoldSeat calls CreateHold AFTER the Redis lock was
-// acquired; Service.ConfirmBooking calls ConfirmHold (no Redis at all);
-// Service.CancelHold calls ReleaseHold. PostgreSQL is the AUTHORITY: whatever
+// acquired; Service.CancelHold calls ReleaseHold. Paying for a hold and
+// turning it into a booking is in repository_payments.go. PostgreSQL is the AUTHORITY: whatever
 // Redis said, these transactions make the final decision.
 //
 // Every expiry decision uses the DATABASE clock (NOW()), never the Go
@@ -144,85 +144,6 @@ func (r *PostgresRepository) CreateHold(ctx context.Context, in HoldSeatInput, t
 		return Hold{}, false, dbError(err, "commit hold")
 	}
 	return hold, true, nil
-}
-
-// ConfirmHold turns the user's ACTIVE hold into a booking, in one transaction.
-//
-// It makes NO Redis call, on purpose: the hold row in PostgreSQL is all the
-// proof we need. That is why an existing hold can still be confirmed while
-// Redis is down (fail closed for NEW holds, but valid reservations complete).
-func (r *PostgresRepository) ConfirmHold(ctx context.Context, in ConfirmInput) (Booking, error) {
-	ctx, cancel := context.WithTimeout(ctx, r.queryTimeout)
-	defer cancel()
-
-	tx, err := r.pool.Begin(ctx)
-	if err != nil {
-		return Booking{}, dbError(err, "begin confirm")
-	}
-	defer tx.Rollback(ctx)
-
-	// 1. Lock the hold row. If 10 confirms for the same hold arrive at once,
-	//    they run one after another here: the first consumes the hold, and
-	//    the other 9 then see status CONSUMED.
-	var h Hold
-	var status string
-	var expired bool
-	err = tx.QueryRow(ctx, `
-		SELECT id, show_id, seat_id, user_id, status, expires_at <= NOW() AS expired
-		FROM holds
-		WHERE id = $1
-		FOR UPDATE`, in.HoldID).Scan(&h.ID, &h.ShowID, &h.SeatID, &h.UserID, &status, &expired)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return Booking{}, ErrHoldNotFound
-	}
-	if err != nil {
-		return Booking{}, dbError(err, "lock hold %d", in.HoldID)
-	}
-
-	// 2. Another user's hold gets the SAME answer as a hold that does not
-	//    exist. Answering "403: that hold belongs to someone else" would let
-	//    anyone probe hold IDs and learn which ones are real.
-	if h.UserID != in.UserID {
-		return Booking{}, ErrHoldNotFound
-	}
-
-	// 3. Only an ACTIVE, unexpired hold can be confirmed.
-	switch {
-	case HoldStatus(status) == HoldConsumed:
-		return Booking{}, ErrHoldAlreadyUsed
-	case HoldStatus(status) != HoldActive, expired:
-		// RELEASED, EXPIRED, or ACTIVE but past expires_at. We do not write
-		// EXPIRED here (the transaction rolls back); the next hold attempt
-		// on this seat marks it lazily.
-		return Booking{}, ErrHoldExpired
-	}
-
-	// 4. Create the booking. The UNIQUE constraints still guard it:
-	//    bookings_show_seat_unique -> ErrSeatAlreadyBooked,
-	//    bookings_hold_unique      -> ErrHoldAlreadyUsed.
-	var b Booking
-	err = tx.QueryRow(ctx, `
-		INSERT INTO bookings (show_id, seat_id, user_id, hold_id)
-		VALUES ($1, $2, $3, $4)
-		RETURNING id, show_id, seat_id, user_id, hold_id, created_at`,
-		h.ShowID, h.SeatID, h.UserID, h.ID).
-		Scan(&b.ID, &b.ShowID, &b.SeatID, &b.UserID, &b.HoldID, &b.CreatedAt)
-	if err != nil {
-		return Booking{}, mapInsertBookingError(err)
-	}
-
-	// 5. Mark the hold as used, in the same transaction as the booking:
-	//    either both happen or neither does.
-	if _, err := tx.Exec(ctx, `
-		UPDATE holds SET status = 'CONSUMED', updated_at = NOW()
-		WHERE id = $1`, h.ID); err != nil {
-		return Booking{}, dbError(err, "consume hold %d", h.ID)
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return Booking{}, mapInsertBookingError(err)
-	}
-	return b, nil
 }
 
 // ReleaseHold cancels the user's ACTIVE hold (status -> RELEASED), in one

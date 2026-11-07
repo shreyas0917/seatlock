@@ -35,6 +35,8 @@ import (
 	"github.com/shreyas0917/seatlock/internal/config"
 	"github.com/shreyas0917/seatlock/internal/db"
 	"github.com/shreyas0917/seatlock/internal/lock"
+	"github.com/shreyas0917/seatlock/internal/payment"
+	"github.com/shreyas0917/seatlock/internal/paymentmock"
 )
 
 const defaultTestDatabaseURL = "postgres://seatlock:seatlock@localhost:5434/seatlock_test?sslmode=disable"
@@ -104,7 +106,10 @@ func TestHTTP_ParallelHoldBurstHasNo500s(t *testing.T) {
 
 	// A real HTTP server on a random local port, with the production router.
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	svc := booking.NewService(booking.NewPostgresRepository(pool, testDBQueryTimeout), locker, defaults.HoldTTL)
+	mockServer := httptest.NewServer(paymentmock.New(paymentmock.Options{Logger: logger}))
+	t.Cleanup(mockServer.Close)
+	gateway := payment.NewClient(mockServer.URL, 3*time.Second)
+	svc := booking.NewService(booking.NewPostgresRepository(pool, testDBQueryTimeout), locker, gateway, defaults.HoldTTL)
 	server := httptest.NewServer(NewRouter(svc, pool, locker, logger))
 	t.Cleanup(server.Close)
 

@@ -101,7 +101,7 @@ func TestCreateHold_BookedSeatRejected(t *testing.T) {
 	ctx := context.Background()
 	h, _, err := f.repo.CreateHold(ctx, HoldSeatInput{UserID: "alice", ShowID: f.showID, SeatID: f.seatIDs[0]}, testHoldTTL)
 	require.NoError(t, err)
-	_, err = f.repo.ConfirmHold(ctx, ConfirmInput{UserID: "alice", HoldID: h.ID})
+	_, err = payAndBook(ctx, f, ConfirmInput{UserID: "alice", HoldID: h.ID})
 	require.NoError(t, err)
 
 	_, _, err = f.repo.CreateHold(ctx, HoldSeatInput{UserID: "bob", ShowID: f.showID, SeatID: f.seatIDs[0]}, testHoldTTL)
@@ -118,13 +118,13 @@ func TestCreateHold_SeatFromAnotherShow(t *testing.T) {
 	assert.ErrorIs(t, err, ErrSeatNotInShow)
 }
 
-func TestConfirmHold_Success(t *testing.T) {
+func TestPayAndBook_Success(t *testing.T) {
 	f := setupTestDB(t)
 	ctx := context.Background()
 	h, _, err := f.repo.CreateHold(ctx, HoldSeatInput{UserID: "alice", ShowID: f.showID, SeatID: f.seatIDs[0]}, testHoldTTL)
 	require.NoError(t, err)
 
-	b, err := f.repo.ConfirmHold(ctx, ConfirmInput{UserID: "alice", HoldID: h.ID})
+	b, err := payAndBook(ctx, f, ConfirmInput{UserID: "alice", HoldID: h.ID})
 
 	require.NoError(t, err)
 	assert.Equal(t, h.ID, b.HoldID, "the booking records which hold it came from")
@@ -132,7 +132,7 @@ func TestConfirmHold_Success(t *testing.T) {
 	assert.Equal(t, HoldConsumed, holdStatus(t, f, h.ID))
 }
 
-func TestConfirmHold_Rejections(t *testing.T) {
+func TestPayAndBook_Rejections(t *testing.T) {
 	tests := []struct {
 		name    string
 		prepare func(t *testing.T, f testFixture, holdID int64)
@@ -149,7 +149,7 @@ func TestConfirmHold_Rejections(t *testing.T) {
 			require.NoError(t, err)
 		}, "alice", func(id int64) int64 { return id }, ErrHoldExpired},
 		{"already consumed hold", func(t *testing.T, f testFixture, id int64) {
-			_, err := f.repo.ConfirmHold(context.Background(), ConfirmInput{UserID: "alice", HoldID: id})
+			_, err := payAndBook(context.Background(), f, ConfirmInput{UserID: "alice", HoldID: id})
 			require.NoError(t, err)
 		}, "alice", func(id int64) int64 { return id }, ErrHoldAlreadyUsed},
 	}
@@ -164,7 +164,7 @@ func TestConfirmHold_Rejections(t *testing.T) {
 				tc.prepare(t, f, h.ID)
 			}
 
-			_, err = f.repo.ConfirmHold(ctx, ConfirmInput{UserID: tc.userID, HoldID: tc.holdID(h.ID)})
+			_, err = payAndBook(ctx, f, ConfirmInput{UserID: tc.userID, HoldID: tc.holdID(h.ID)})
 
 			assert.ErrorIs(t, err, tc.wantErr)
 		})
@@ -204,7 +204,7 @@ func TestReleaseHold_ConsumedAndExpired(t *testing.T) {
 	ctx := context.Background()
 	consumed, _, err := f.repo.CreateHold(ctx, HoldSeatInput{UserID: "alice", ShowID: f.showID, SeatID: f.seatIDs[0]}, testHoldTTL)
 	require.NoError(t, err)
-	_, err = f.repo.ConfirmHold(ctx, ConfirmInput{UserID: "alice", HoldID: consumed.ID})
+	_, err = payAndBook(ctx, f, ConfirmInput{UserID: "alice", HoldID: consumed.ID})
 	require.NoError(t, err)
 	expired, _, err := f.repo.CreateHold(ctx, HoldSeatInput{UserID: "alice", ShowID: f.showID, SeatID: f.seatIDs[1]}, testHoldTTL)
 	require.NoError(t, err)
@@ -222,7 +222,7 @@ func TestSeatMap_AvailableHeldBookedExpired(t *testing.T) {
 	// A1 booked, A2 held, A3 held-then-expired.
 	h1, _, err := f.repo.CreateHold(ctx, HoldSeatInput{UserID: "alice", ShowID: f.showID, SeatID: f.seatIDs[0]}, testHoldTTL)
 	require.NoError(t, err)
-	_, err = f.repo.ConfirmHold(ctx, ConfirmInput{UserID: "alice", HoldID: h1.ID})
+	_, err = payAndBook(ctx, f, ConfirmInput{UserID: "alice", HoldID: h1.ID})
 	require.NoError(t, err)
 	_, _, err = f.repo.CreateHold(ctx, HoldSeatInput{UserID: "bob", ShowID: f.showID, SeatID: f.seatIDs[1]}, testHoldTTL)
 	require.NoError(t, err)

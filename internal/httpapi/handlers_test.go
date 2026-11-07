@@ -76,11 +76,29 @@ func (s *stubRepository) CreateHold(ctx context.Context, in booking.HoldSeatInpu
 	return h, !s.existingHold, nil
 }
 
-func (s *stubRepository) ConfirmHold(ctx context.Context, in booking.ConfirmInput) (booking.Booking, error) {
+// BeginPayment + CompletePayment: confirmErr (if set) is returned by
+// BeginPayment, so the confirm endpoint answers with that error.
+func (s *stubRepository) BeginPayment(ctx context.Context, in booking.ConfirmInput) (booking.Payment, bool, error) {
 	if s.confirmErr != nil {
-		return booking.Booking{}, s.confirmErr
+		return booking.Payment{}, false, s.confirmErr
 	}
-	return booking.Booking{ID: 1, ShowID: 1, SeatID: 7, UserID: in.UserID, HoldID: in.HoldID, CreatedAt: time.Now()}, nil
+	return booking.Payment{ID: 3, HoldID: in.HoldID, UserID: in.UserID, AmountPaise: 25000,
+		ChargeKey: "pay-3", Status: booking.PaymentPending}, true, nil
+}
+
+func (s *stubRepository) CompletePayment(ctx context.Context, paymentID int64, chargeID string) (booking.CompleteResult, error) {
+	b := booking.Booking{ID: 1, ShowID: 1, SeatID: 7, UserID: "alice", HoldID: 12, CreatedAt: time.Now()}
+	return booking.CompleteResult{Kind: booking.Booked, Booking: b}, nil
+}
+
+func (s *stubRepository) MarkPaymentDeclined(ctx context.Context, paymentID int64) error { return nil }
+
+func (s *stubRepository) MarkRefunded(ctx context.Context, paymentID, outboxID int64) (booking.Payment, error) {
+	return booking.Payment{ID: paymentID, Status: booking.PaymentRefunded}, nil
+}
+
+func (s *stubRepository) RecordOutboxFailure(ctx context.Context, outboxID int64, failure string) error {
+	return nil
 }
 
 func (s *stubRepository) ReleaseHold(ctx context.Context, userID string, holdID int64) (booking.Hold, int64, error) {
@@ -110,6 +128,27 @@ func (l stubLocker) Release(ctx context.Context, showID, seatID int64, owner str
 	return nil
 }
 
+// stubGateway is a PaymentGateway: chargeErr simulates no answer, decline a
+// declined card.
+type stubGateway struct {
+	chargeErr error
+	decline   bool
+}
+
+func (g stubGateway) Charge(ctx context.Context, req booking.ChargeRequest) (booking.ChargeResult, error) {
+	if g.chargeErr != nil {
+		return booking.ChargeResult{}, g.chargeErr
+	}
+	if g.decline {
+		return booking.ChargeResult{ChargeID: "ch_1", Status: booking.ChargeDeclined}, nil
+	}
+	return booking.ChargeResult{ChargeID: "ch_1", Status: booking.ChargeSucceeded}, nil
+}
+
+func (g stubGateway) Refund(ctx context.Context, req booking.RefundRequest) (booking.RefundResult, error) {
+	return booking.RefundResult{RefundID: "re_1"}, nil
+}
+
 // stubPinger simulates a dependency for /readyz.
 type stubPinger struct{ err error }
 
@@ -118,7 +157,7 @@ func (p stubPinger) Ping(ctx context.Context) error { return p.err }
 // newTestRouter builds the full router with the stubs. Logs are discarded.
 func newTestRouter(repo *stubRepository, locker stubLocker) http.Handler {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	svc := booking.NewService(repo, locker, 300*time.Second)
+	svc := booking.NewService(repo, locker, stubGateway{}, 300*time.Second)
 	return NewRouter(svc, stubPinger{}, stubPinger{}, logger)
 }
 
@@ -342,7 +381,7 @@ func TestGetBooking(t *testing.T) {
 
 func TestReadyz(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	svc := booking.NewService(&stubRepository{}, stubLocker{}, time.Minute)
+	svc := booking.NewService(&stubRepository{}, stubLocker{}, stubGateway{}, time.Minute)
 	down := stubPinger{err: errors.New("connection refused")}
 
 	tests := []struct {
@@ -369,4 +408,38 @@ func TestReadyz(t *testing.T) {
 			assert.Equal(t, tc.wantRD, resp.Redis)
 		})
 	}
+}
+
+// ---------- payment errors (Phase 3) ----------
+
+func TestConfirmBooking_PaymentErrors(t *testing.T) {
+	tests := []struct {
+		name       string
+		gateway    stubGateway
+		wantStatus int
+		wantCode   string
+	}{
+		{"declined", stubGateway{decline: true}, http.StatusPaymentRequired, "PAYMENT_DECLINED"},
+		{"no answer", stubGateway{chargeErr: fmt.Errorf("charge: %w", booking.ErrGatewayNoAnswer)}, http.StatusGatewayTimeout, "PAYMENT_PENDING"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+			svc := booking.NewService(&stubRepository{}, stubLocker{}, tc.gateway, time.Minute)
+			router := NewRouter(svc, stubPinger{}, stubPinger{}, logger)
+
+			rec := send(t, router, http.MethodPost, "/v1/bookings", "alice", `{"hold_id": 12}`)
+
+			assert.Equal(t, tc.wantStatus, rec.Code)
+			assert.Equal(t, tc.wantCode, decodeErrorCode(t, rec))
+		})
+	}
+}
+
+func TestCancelHold_409PaymentInProgress(t *testing.T) {
+	rec := send(t, newTestRouter(&stubRepository{releaseErr: booking.ErrPaymentInProgress}, stubLocker{}),
+		http.MethodDelete, "/v1/holds/12", "alice", "")
+
+	assert.Equal(t, http.StatusConflict, rec.Code)
+	assert.Equal(t, "PAYMENT_IN_PROGRESS", decodeErrorCode(t, rec))
 }

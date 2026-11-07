@@ -1,8 +1,9 @@
-// service_holds.go holds the business rules for the hold -> confirm flow.
+// service_holds.go holds the business rules for seat holds.
 //
 //	POST   /v1/holds          -> HoldSeat       (Redis lock, then Postgres)
-//	POST   /v1/bookings       -> ConfirmBooking (Postgres only, no Redis)
-//	DELETE /v1/holds/{holdID} -> CancelHold     (Postgres, then best-effort Redis)
+//	DELETE /v1/holds/{holdID} -> CancelHold     (Postgres + outbox, then best-effort Redis)
+//
+// Confirming a hold (pay, then book) is in service_payments.go.
 //
 // The policy, enforced here: SeatLock FAILS CLOSED. If the seat lock (Redis)
 // cannot be asked, NO new hold is created: there is no fallback that skips
@@ -85,49 +86,6 @@ func isDefiniteHoldRejection(err error) bool {
 	return errors.Is(err, ErrSeatHeld) ||
 		errors.Is(err, ErrSeatAlreadyBooked) ||
 		errors.Is(err, ErrSeatNotInShow)
-}
-
-// ConfirmBooking turns the user's active hold into a booking.
-//
-// There is deliberately NO Redis call before the database work: the hold row
-// in PostgreSQL is the proof of the reservation. So confirming still works
-// while Redis is down: existing valid reservations may complete.
-//
-// The final guard against double booking is still the Phase 1 one: the
-// database's UNIQUE(show_id, seat_id) constraint on bookings. We never write
-// "if the seat is free { insert }" (check-then-insert) in Go:
-//
-//	time  user A                       user B
-//	t1    SELECT -> seat 7 is free
-//	t2                                 SELECT -> seat 7 is free
-//	t3    INSERT booking (seat 7)
-//	t4                                 INSERT booking (seat 7)   <- double booking!
-//
-// Between the check and the insert there is a gap, and another request can
-// slip into it. A Go mutex would not help either: with 2+ API servers, each
-// has its own mutex. The database is the one place every request goes
-// through, and a UNIQUE constraint is checked atomically inside Postgres: of
-// two concurrent inserts for the same seat, exactly one commits and the other
-// gets error 23505, which becomes ErrSeatAlreadyBooked.
-func (s *Service) ConfirmBooking(ctx context.Context, in ConfirmInput) (Booking, error) {
-	in.UserID = strings.TrimSpace(in.UserID)
-	if in.UserID == "" {
-		return Booking{}, ErrMissingUserID
-	}
-	if in.HoldID <= 0 {
-		return Booking{}, fmt.Errorf("%w: hold_id must be a positive number", ErrInvalidInput)
-	}
-
-	b, err := s.repo.ConfirmHold(ctx, in)
-	if err != nil {
-		return Booking{}, err
-	}
-
-	// The seat is booked now, so its Redis lock is no longer needed. Best
-	// effort: a leftover lock on a BOOKED seat is harmless (Postgres
-	// rejects any new hold on a booked seat) and expires by its TTL.
-	s.releaseLock(ctx, b.ShowID, b.SeatID, b.UserID)
-	return b, nil
 }
 
 // CancelHold releases the user's active hold.

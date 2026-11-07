@@ -202,7 +202,7 @@ func (r *PostgresRepository) ListSeatsWithStatus(ctx context.Context, showID int
 }
 
 // mapInsertBookingError turns known constraint violations on the bookings
-// insert (in ConfirmHold) into domain errors.
+// insert (in CompletePayment) into domain errors.
 //
 // errors.As looks through the chain of wrapped errors for one of type
 // *pgconn.PgError (the error pgx returns when Postgres itself rejects a
@@ -214,7 +214,7 @@ func mapInsertBookingError(err error) error {
 		case pgErr.Code == pgUniqueViolation && pgErr.ConstraintName == constraintBookingsShowSeatUnique:
 			return ErrSeatAlreadyBooked
 		case pgErr.Code == pgUniqueViolation && pgErr.ConstraintName == constraintBookingsHoldUnique:
-			// A second booking from the same hold. FOR UPDATE in ConfirmHold
+			// A second booking from the same hold. FOR UPDATE in CompletePayment
 			// prevents this; the constraint is the backstop.
 			return ErrHoldAlreadyUsed
 		case pgErr.Code == pgForeignKeyViolation &&

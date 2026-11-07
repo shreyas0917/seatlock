@@ -22,6 +22,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
+	"net/http/httptest"
 	"os"
 	"sync"
 	"testing"
@@ -36,6 +39,8 @@ import (
 	"github.com/shreyas0917/seatlock/internal/config"
 	"github.com/shreyas0917/seatlock/internal/db"
 	"github.com/shreyas0917/seatlock/internal/lock"
+	"github.com/shreyas0917/seatlock/internal/payment"
+	"github.com/shreyas0917/seatlock/internal/paymentmock"
 )
 
 const (
@@ -50,6 +55,11 @@ const (
 const (
 	testDBQueryTimeout = 15 * time.Second
 	testRedisTimeout   = 2 * time.Second
+	// The mock gateway's "slow" charge (1.5s) is shorter than the payment
+	// timeout (3s), so "slow" means late-but-answered, and only "timeout"
+	// means no answer.
+	testPaymentTimeout = 3 * time.Second
+	testSlowDelay      = 1500 * time.Millisecond
 )
 
 // env is everything one test needs.
@@ -57,7 +67,10 @@ type env struct {
 	pool    *pgxpool.Pool
 	redis   *redis.Client
 	repo    *booking.PostgresRepository
-	svc     *booking.Service // wired to the real Redis
+	svc     *booking.Service // wired to the real Redis and the mock gateway
+	mock    *paymentmock.Server
+	gateway *payment.Client
+	locker  *lock.RedisLocker
 	showID  int64
 	seatIDs []int64
 }
@@ -108,9 +121,21 @@ func setup(t *testing.T) env {
 	require.NoError(t, rdb.FlushDB(ctx).Err(), "is redis running? try `make up`")
 	waitForIdleConns(t, rdb, int(defaults.RedisMinIdleConns))
 
+	// A fresh in-process mock gateway per test: no charges, stats or queued
+	// behaviours can leak from one test into the next.
+	mock := paymentmock.New(paymentmock.Options{
+		SlowDelay: testSlowDelay,
+		Logger:    slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	mockServer := httptest.NewServer(mock)
+	t.Cleanup(mockServer.Close)
+	gateway := payment.NewClient(mockServer.URL, testPaymentTimeout)
+
 	repo := booking.NewPostgresRepository(pool, testDBQueryTimeout)
-	svc := booking.NewService(repo, lock.NewRedisLocker(rdb, holdTTL, lockExtra), holdTTL)
-	return env{pool: pool, redis: rdb, repo: repo, svc: svc, showID: showID, seatIDs: seatIDs}
+	locker := lock.NewRedisLocker(rdb, holdTTL, lockExtra)
+	svc := booking.NewService(repo, locker, gateway, holdTTL)
+	return env{pool: pool, redis: rdb, repo: repo, svc: svc, mock: mock, gateway: gateway,
+		locker: locker, showID: showID, seatIDs: seatIDs}
 }
 
 // waitForIdleConns waits until the Redis client has opened its MinIdleConns
@@ -133,7 +158,7 @@ func deadLockerService(e env) *booking.Service {
 		Addr:        "127.0.0.1:1",
 		DialTimeout: 200 * time.Millisecond, ReadTimeout: 200 * time.Millisecond, WriteTimeout: 200 * time.Millisecond,
 	})
-	return booking.NewService(e.repo, lock.NewRedisLocker(dead, holdTTL, lockExtra), holdTTL)
+	return booking.NewService(e.repo, lock.NewRedisLocker(dead, holdTTL, lockExtra), e.gateway, holdTTL)
 }
 
 // countRows runs a COUNT(*) query.
@@ -189,8 +214,12 @@ func TestHoldRace(t *testing.T) {
 }
 
 // TestConfirmRace: the same user sends confirm 10 times at once for one hold
-// (double-click, retries). FOR UPDATE on the hold row serialises them: the
-// first creates the booking, the other 9 find the hold CONSUMED.
+// (double-click, retries), WITHOUT idempotency keys (this is the service
+// layer). All 10 share the hold's ONE pending payment and its charge_key, so
+// the gateway charges once. FOR UPDATE in Tx B serialises them: the first
+// books, the others find the payment SUCCEEDED and get the SAME booking back
+// (rule: a booked payment is never refunded). A confirm that only starts
+// after the booking committed sees a consumed hold: ErrHoldAlreadyUsed.
 func TestConfirmRace(t *testing.T) {
 	e := setup(t)
 	ctx := context.Background()
@@ -201,32 +230,44 @@ func TestConfirmRace(t *testing.T) {
 	start := make(chan struct{})
 	var wg sync.WaitGroup
 	errs := make([]error, confirms)
+	bookingIDs := make([]int64, confirms)
 	for i := 0; i < confirms; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
 			<-start
-			_, errs[i] = e.svc.ConfirmBooking(ctx, booking.ConfirmInput{UserID: "alice", HoldID: hold.ID})
+			var b booking.Booking
+			b, errs[i] = e.svc.ConfirmBooking(ctx, booking.ConfirmInput{UserID: "alice", HoldID: hold.ID})
+			bookingIDs[i] = b.ID
 		}(i)
 	}
 	close(start)
 	wg.Wait()
 
-	booked, used := 0, 0
+	succeeded, used := 0, 0
+	var theBooking int64
 	for i, err := range errs {
 		switch {
 		case err == nil:
-			booked++
+			succeeded++
+			if theBooking == 0 {
+				theBooking = bookingIDs[i]
+			}
+			assert.Equal(t, theBooking, bookingIDs[i], "every success must return the SAME booking")
 		case errors.Is(err, booking.ErrHoldAlreadyUsed):
 			used++
 		default:
 			t.Errorf("confirm %d: unexpected error: %v", i, err)
 		}
 	}
-	t.Logf("%d confirms -> %d booking, %d ErrHoldAlreadyUsed", confirms, booked, used)
-	assert.Equal(t, 1, booked)
-	assert.Equal(t, confirms-1, used)
+	st := e.mock.Stats()
+	t.Logf("%d confirms -> %d returned the booking, %d ErrHoldAlreadyUsed; gateway: %d charge(s), %d refund(s)",
+		confirms, succeeded, used, st.MoneyTaken, st.TotalRefunds)
+	assert.GreaterOrEqual(t, succeeded, 1)
+	assert.Equal(t, confirms, succeeded+used)
 	assert.Equal(t, 1, countRows(t, e, `SELECT COUNT(*) FROM bookings WHERE hold_id = $1`, hold.ID))
+	assert.Equal(t, 1, st.MoneyTaken, "exactly one charge")
+	assert.Zero(t, st.TotalRefunds, "no refunds")
 }
 
 // TestConfirmRejections: every way a confirm must be refused.

@@ -94,13 +94,30 @@ func setupTestDB(t *testing.T) testFixture {
 	return testFixture{pool: pool, repo: NewPostgresRepository(pool, testDBQueryTimeout), showID: showID, seatIDs: seatIDs}
 }
 
-// bookSeat books a seat the only way that exists now: hold, then confirm.
+// payAndBook simulates a confirm whose charge succeeded: Tx A (BeginPayment)
+// then Tx B (CompletePayment), with no gateway in between.
+func payAndBook(ctx context.Context, f testFixture, in ConfirmInput) (Booking, error) {
+	p, _, err := f.repo.BeginPayment(ctx, in)
+	if err != nil {
+		return Booking{}, err
+	}
+	res, err := f.repo.CompletePayment(ctx, p.ID, "ch_test")
+	if err != nil {
+		return Booking{}, err
+	}
+	if res.Kind != Booked {
+		return Booking{}, &HoldExpiredError{PaymentStatus: res.Payment.Status}
+	}
+	return res.Booking, nil
+}
+
+// bookSeat books a seat the only way that exists now: hold, then pay and book.
 func bookSeat(t *testing.T, f testFixture, userID string, seatID int64) Booking {
 	t.Helper()
 	ctx := context.Background()
 	h, _, err := f.repo.CreateHold(ctx, HoldSeatInput{UserID: userID, ShowID: f.showID, SeatID: seatID}, testHoldTTL)
 	require.NoError(t, err)
-	b, err := f.repo.ConfirmHold(ctx, ConfirmInput{UserID: userID, HoldID: h.ID})
+	b, err := payAndBook(ctx, f, ConfirmInput{UserID: userID, HoldID: h.ID})
 	require.NoError(t, err)
 	return b
 }
@@ -118,7 +135,7 @@ func insertConsumedHold(t *testing.T, f testFixture, userID string, seatID int64
 	return id
 }
 
-// insertBooking runs the same INSERT as ConfirmHold and maps its errors the
+// insertBooking runs the same INSERT as CompletePayment and maps its errors the
 // same way, but without the hold checks in front of it.
 func insertBooking(f testFixture, userID string, showID, seatID, holdID int64) error {
 	_, err := f.pool.Exec(context.Background(), `

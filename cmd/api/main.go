@@ -40,6 +40,7 @@ import (
 	"github.com/shreyas0917/seatlock/internal/db"
 	"github.com/shreyas0917/seatlock/internal/httpapi"
 	"github.com/shreyas0917/seatlock/internal/lock"
+	"github.com/shreyas0917/seatlock/internal/payment"
 )
 
 // How long to wait for in-flight requests to finish during shutdown.
@@ -98,7 +99,10 @@ func run() error {
 	locker := lock.NewRedisLocker(redisClient, cfg.HoldTTL, cfg.RedisLockExtra)
 
 	repo := booking.NewPostgresRepository(pool, cfg.DBQueryTimeout)
-	svc := booking.NewService(repo, locker, cfg.HoldTTL)
+	// The payment gateway client. Confirm talks to it over HTTP; nothing in
+	// the confirm/payment path depends on Redis.
+	gateway := payment.NewClient(cfg.PaymentURL, cfg.PaymentTimeout)
+	svc := booking.NewService(repo, locker, gateway, cfg.HoldTTL)
 	router := httpapi.NewRouter(svc, pool, locker, logger)
 
 	server := &http.Server{
