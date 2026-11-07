@@ -211,12 +211,12 @@ func (r *PostgresRepository) CompletePayment(ctx context.Context, paymentID int6
 		if err := tx.Commit(ctx); err != nil {
 			return CompleteResult{}, dbError(err, "commit complete payment %d", p.ID)
 		}
-		return CompleteResult{Kind: Booked, Booking: b, Payment: p}, nil
+		return CompleteResult{Kind: Booked, Booking: b, Payment: p, ShowID: h.ShowID, SeatID: h.SeatID}, nil
 	case PaymentRefundPending, PaymentRefunded:
 		if err := tx.Commit(ctx); err != nil {
 			return CompleteResult{}, dbError(err, "commit complete payment %d", p.ID)
 		}
-		return CompleteResult{Kind: AlreadyRefunding, Payment: p}, nil
+		return CompleteResult{Kind: AlreadyRefunding, Payment: p, ShowID: h.ShowID, SeatID: h.SeatID}, nil
 	case PaymentDeclined:
 		// The gateway cannot say "succeeded" for a key it declined (it
 		// replays stored results), so this means a bug somewhere.
@@ -254,7 +254,7 @@ func (r *PostgresRepository) CompletePayment(ctx context.Context, paymentID int6
 		if err := tx.Commit(ctx); err != nil {
 			return CompleteResult{}, mapInsertBookingError(err)
 		}
-		return CompleteResult{Kind: Booked, Booking: b, Payment: p}, nil
+		return CompleteResult{Kind: Booked, Booking: b, Payment: p, ShowID: h.ShowID, SeatID: h.SeatID}, nil
 	}
 
 	// Money was taken, but the hold expired (or was released) while the
@@ -292,7 +292,7 @@ func (r *PostgresRepository) CompletePayment(ctx context.Context, paymentID int6
 	if err := tx.Commit(ctx); err != nil {
 		return CompleteResult{}, dbError(err, "commit refund for payment %d", p.ID)
 	}
-	return CompleteResult{Kind: RefundRequired, Payment: p, OutboxID: outboxID}, nil
+	return CompleteResult{Kind: RefundRequired, Payment: p, OutboxID: outboxID, ShowID: h.ShowID, SeatID: h.SeatID}, nil
 }
 
 // bookingForHold returns the booking that was created from a hold.

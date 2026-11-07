@@ -193,7 +193,7 @@ func (f *fakeRepository) CompletePayment(ctx context.Context, paymentID int64, c
 		p.ProviderChargeID = chargeID
 		f.payments[p.ID] = p
 		f.nextID++
-		return CompleteResult{Kind: RefundRequired, Payment: p, OutboxID: f.nextID}, nil
+		return CompleteResult{Kind: RefundRequired, Payment: p, OutboxID: f.nextID, ShowID: h.ShowID, SeatID: h.SeatID}, nil
 	}
 	f.nextID++
 	b := Booking{ID: f.nextID, ShowID: h.ShowID, SeatID: h.SeatID, UserID: h.UserID, HoldID: h.ID, CreatedAt: time.Now()}

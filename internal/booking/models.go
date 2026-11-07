@@ -152,4 +152,6 @@ type CompleteResult struct {
 	Booking  Booking // set when Kind == Booked
 	Payment  Payment
 	OutboxID int64 // the REFUND outbox row, when Kind == RefundRequired
+	// ShowID and SeatID identify the hold's seat (to release its Redis lock).
+	ShowID, SeatID int64
 }

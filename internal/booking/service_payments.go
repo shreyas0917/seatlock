@@ -113,9 +113,15 @@ func (s *Service) ConfirmBooking(ctx context.Context, in ConfirmInput) (Booking,
 
 	case RefundRequired:
 		status := s.refundInline(ctx, result.Payment, charge.ChargeID, result.OutboxID)
+		// The hold is dead (EXPIRED or RELEASED), so its Redis lock guards
+		// nothing: give it back, or the seat would look "held" in Redis
+		// while Postgres already shows it AVAILABLE. Owner-checked, so it
+		// can never delete a NEW lock taken by another user meanwhile.
+		s.releaseLock(ctx, result.ShowID, result.SeatID, in.UserID)
 		return Booking{}, &HoldExpiredError{PaymentStatus: status}
 
 	default: // AlreadyRefunding: an earlier request already decided to refund.
+		s.releaseLock(ctx, result.ShowID, result.SeatID, in.UserID)
 		return Booking{}, &HoldExpiredError{PaymentStatus: result.Payment.Status}
 	}
 }

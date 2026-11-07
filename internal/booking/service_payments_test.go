@@ -91,7 +91,7 @@ func TestConfirm_TxBFails_IsPending(t *testing.T) {
 }
 
 func TestConfirm_HoldExpiredDuringPayment_Refunds(t *testing.T) {
-	svc, repo, _, gateway := newTestServiceWithGateway()
+	svc, repo, locker, gateway := newTestServiceWithGateway()
 	repo.expireDuringPayment = true
 	h := holdFor(t, svc)
 
@@ -104,6 +104,7 @@ func TestConfirm_HoldExpiredDuringPayment_Refunds(t *testing.T) {
 	assert.Equal(t, 1, gateway.refunds)
 	assert.Len(t, repo.outboxDone, 1, "the refund outbox row is marked DONE")
 	assert.Empty(t, repo.bookings, "no booking")
+	assert.Equal(t, 1, locker.releaseCalls, "the dead hold's Redis lock is released")
 }
 
 func TestConfirm_RefundFails_StaysRefundPending(t *testing.T) {
