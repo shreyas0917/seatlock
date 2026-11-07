@@ -133,3 +133,32 @@ func TestRelease_MakesKeyRetryable(t *testing.T) {
 	_, err = s.Begin(ctx, "alice", "k1", "h-other")
 	assert.ErrorIs(t, err, ErrKeyReused, "a released key stays bound to its request")
 }
+
+func TestDeleteCompleted_OnlyOldCompletedKeys(t *testing.T) {
+	s := newTestStore(t, 30*time.Second)
+	ctx := context.Background()
+	for _, key := range []string{"old-done", "new-done", "old-running"} {
+		claim, err := s.Begin(ctx, "alice", key, "h")
+		require.NoError(t, err)
+		if key != "old-running" {
+			_, err = s.Complete(ctx, "alice", key, claim.Token, Response{Status: 201, Body: []byte(`{}`)})
+			require.NoError(t, err)
+		}
+	}
+	_, err := s.pool.Exec(ctx, `UPDATE idempotency_keys SET updated_at = NOW() - interval '2 days' WHERE key IN ('old-done', 'old-running')`)
+	require.NoError(t, err)
+
+	deleted, err := s.DeleteCompleted(ctx, 24*time.Hour, 100)
+
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), deleted, "only the old COMPLETED key")
+	var left []string
+	rows, err := s.pool.Query(ctx, `SELECT key FROM idempotency_keys ORDER BY key`)
+	require.NoError(t, err)
+	for rows.Next() {
+		var k string
+		require.NoError(t, rows.Scan(&k))
+		left = append(left, k)
+	}
+	assert.Equal(t, []string{"new-done", "old-running"}, left, "IN_PROGRESS keys are never deleted")
+}

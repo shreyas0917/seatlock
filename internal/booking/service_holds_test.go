@@ -186,3 +186,15 @@ func TestCancelHold(t *testing.T) {
 	assert.Equal(t, HoldReleased, released.Status)
 	assert.Equal(t, 1, locker.releaseCalls)
 }
+
+// The user re-holds a seat whose hold has a payment in flight: 409
+// PAYMENT_IN_PROGRESS, and their Redis lock must stay (it protects the payment).
+func TestHoldSeat_PaymentInProgress_KeepsLock(t *testing.T) {
+	svc, repo, locker := newTestService()
+	repo.createHoldErr = ErrPaymentInProgress
+
+	_, _, err := svc.HoldSeat(context.Background(), HoldSeatInput{UserID: "alice", ShowID: 1, SeatID: 1})
+
+	assert.ErrorIs(t, err, ErrPaymentInProgress)
+	assert.Zero(t, locker.releaseCalls)
+}

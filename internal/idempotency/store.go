@@ -224,6 +224,32 @@ func (s *Store) Release(ctx context.Context, userID, key, token string) error {
 	return nil
 }
 
+// DeleteCompleted deletes up to limit COMPLETED keys whose response was
+// stored more than retention ago, and returns how many it deleted. Used by
+// the worker's cleanup job so the table does not grow forever.
+//
+// The trade-off: once a key is deleted, a request with it is treated as NEW
+// (it would run again). So retention (IDEMPOTENCY_RETENTION, default 24h)
+// must be longer than any realistic client retry window. IN_PROGRESS keys
+// are never deleted: they belong to a running request, or carry a request
+// hash a retry still needs (to answer 422 for a different body).
+func (s *Store) DeleteCompleted(ctx context.Context, retention time.Duration, limit int) (int64, error) {
+	ctx, cancel := context.WithTimeout(ctx, s.queryTimeout)
+	defer cancel()
+
+	tag, err := s.pool.Exec(ctx, `
+		DELETE FROM idempotency_keys
+		WHERE (user_id, key) IN (
+			SELECT user_id, key FROM idempotency_keys
+			WHERE status = 'COMPLETED' AND updated_at <= NOW() - make_interval(secs => $1)
+			LIMIT $2
+			FOR UPDATE SKIP LOCKED)`, retention.Seconds(), limit)
+	if err != nil {
+		return 0, storeError(err, "delete old idempotency keys")
+	}
+	return tag.RowsAffected(), nil
+}
+
 // newToken returns a random 128-bit lease token.
 func newToken() (string, error) {
 	b := make([]byte, 16)

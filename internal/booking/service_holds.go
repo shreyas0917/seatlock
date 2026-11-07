@@ -81,7 +81,10 @@ func (s *Service) HoldSeat(ctx context.Context, in HoldSeatInput) (Hold, bool, e
 }
 
 // isDefiniteHoldRejection reports whether err is a business answer from
-// Postgres that guarantees NO hold was created for this request.
+// Postgres that guarantees NO hold was created for this request, AND that the
+// lock guards nothing of this user's. (ErrPaymentInProgress is deliberately
+// absent: the user's existing hold has a payment in flight, and their Redis
+// lock must keep protecting that seat.)
 func isDefiniteHoldRejection(err error) bool {
 	return errors.Is(err, ErrSeatHeld) ||
 		errors.Is(err, ErrSeatAlreadyBooked) ||

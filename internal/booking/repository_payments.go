@@ -379,17 +379,3 @@ func (r *PostgresRepository) MarkOutboxDone(ctx context.Context, outboxID int64)
 	}
 	return nil
 }
-
-// RecordOutboxFailure notes a failed inline attempt; the row stays PENDING
-// for the Phase 4 worker, which will retry it.
-func (r *PostgresRepository) RecordOutboxFailure(ctx context.Context, outboxID int64, failure string) error {
-	ctx, cancel := context.WithTimeout(ctx, r.queryTimeout)
-	defer cancel()
-
-	if _, err := r.pool.Exec(ctx, `
-		UPDATE outbox SET attempts = attempts + 1, last_error = $2
-		WHERE id = $1`, outboxID, failure); err != nil {
-		return dbError(err, "record outbox %d failure", outboxID)
-	}
-	return nil
-}

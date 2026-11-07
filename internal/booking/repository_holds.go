@@ -84,13 +84,15 @@ func (r *PostgresRepository) CreateHold(ctx context.Context, in HoldSeatInput, t
 		return Hold{}, false, dbError(err, "lock seat %d", in.SeatID)
 	}
 
-	// 2. Lazy expiry: an ACTIVE hold whose time has passed (database clock)
-	//    is marked EXPIRED now, so it no longer blocks the seat or the
-	//    one-active-hold-per-seat index.
+	// 2. Lazy expiry: an ACTIVE hold that is dead (deadHoldCondition: time
+	//    up, and no payment in flight or that payment stuck past
+	//    PendingHoldMax) is marked EXPIRED now, so it no longer blocks the
+	//    seat or the one-active-hold-per-seat index. A hold whose payment is
+	//    still in flight is NOT expired here: the paying user keeps the seat.
 	if _, err := tx.Exec(ctx, `
-		UPDATE holds SET status = 'EXPIRED', updated_at = NOW()
-		WHERE show_id = $1 AND seat_id = $2
-		  AND status = 'ACTIVE' AND expires_at <= NOW()`, in.ShowID, in.SeatID); err != nil {
+		UPDATE holds h SET status = 'EXPIRED', updated_at = NOW()
+		WHERE h.show_id = $1 AND h.seat_id = $2
+		  AND h.status = 'ACTIVE' AND `+deadHoldCondition(3), in.ShowID, in.SeatID, r.limits.PendingHoldMax.Seconds()); err != nil {
 		return Hold{}, false, dbError(err, "expire old holds for seat %d", in.SeatID)
 	}
 
@@ -110,6 +112,19 @@ func (r *PostgresRepository) CreateHold(ctx context.Context, in HoldSeatInput, t
 		SELECT `+holdColumns+`
 		FROM holds
 		WHERE show_id = $1 AND seat_id = $2 AND status = 'ACTIVE'`, in.ShowID, in.SeatID))
+	if err == nil && existing.UserID == in.UserID {
+		// The user is already paying for this hold: a new hold would be
+		// meaningless (and the old one may show seconds_left 0). Say so.
+		var paying bool
+		if err := tx.QueryRow(ctx, `
+			SELECT EXISTS (SELECT 1 FROM payments WHERE hold_id = $1 AND status = 'PENDING')`,
+			existing.ID).Scan(&paying); err != nil {
+			return Hold{}, false, dbError(err, "check payments of hold %d", existing.ID)
+		}
+		if paying {
+			return Hold{}, false, ErrPaymentInProgress
+		}
+	}
 	switch {
 	case err == nil && existing.UserID == in.UserID:
 		// Same user asked again (e.g. a retry after a timeout): give back

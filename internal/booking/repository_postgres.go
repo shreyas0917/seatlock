@@ -62,7 +62,26 @@ func dbError(err error, format string, args ...any) error {
 type PostgresRepository struct {
 	pool         *pgxpool.Pool
 	queryTimeout time.Duration
+	limits       Limits
 }
+
+// Limits are timing/retry rules shared by the API and the worker. Both read
+// them from the same config, so both apply the SAME rules.
+type Limits struct {
+	// PendingHoldMax: an expired hold that still has a PENDING payment keeps
+	// blocking its seat (its payment may yet succeed) for at most this long
+	// after expires_at. Then it may be expired anyway; see deadHoldCondition.
+	PendingHoldMax time.Duration
+	// OutboxMaxAttempts: after this many attempts an outbox row becomes a
+	// FAILED dead letter.
+	OutboxMaxAttempts int
+}
+
+// DefaultLimits are used until SetLimits is called.
+var DefaultLimits = Limits{PendingHoldMax: 10 * time.Minute, OutboxMaxAttempts: 20}
+
+// SetLimits replaces the timing/retry rules (from config, or short ones in tests).
+func (r *PostgresRepository) SetLimits(l Limits) { r.limits = l }
 
 // Compile-time check that *PostgresRepository satisfies Repository. If a
 // method is missing or has the wrong signature, the build fails here with a
@@ -75,7 +94,29 @@ var _ Repository = (*PostgresRepository)(nil)
 // transaction may take. If Postgres is stuck (locks, overload), we give up
 // with ErrBusy instead of letting requests pile up forever.
 func NewPostgresRepository(pool *pgxpool.Pool, queryTimeout time.Duration) *PostgresRepository {
-	return &PostgresRepository{pool: pool, queryTimeout: queryTimeout}
+	return &PostgresRepository{pool: pool, queryTimeout: queryTimeout, limits: DefaultLimits}
+}
+
+// deadHoldCondition is THE rule for "this ACTIVE hold no longer blocks its
+// seat", used by CreateHold (lazy expiry), the seat map and the worker's hold
+// expirer, so all three always agree. A hold is dead when its time is up AND
+// either it has no PENDING payment, or that payment has been unresolved for
+// longer than PendingHoldMax past the hold's expiry.
+//
+// Why a PENDING payment keeps the seat blocked: the user is paying. Their
+// charge may still succeed, so we do not hand the seat to someone else while
+// the outcome is unknown. Why only for PendingHoldMax: if the gateway is
+// unreachable for a long time, the seat must not be blocked forever. Freeing
+// it then is SAFE, because the payment stays PENDING for the reconciler, and
+// if the charge turns out to have succeeded, CompletePayment sees the expired
+// hold and refunds (it never books an expired hold).
+//
+// It expects the hold's table alias to be "h" and $N to be PendingHoldMax in
+// seconds, where N is the given placeholder number.
+func deadHoldCondition(param int) string {
+	return fmt.Sprintf(`(h.expires_at <= NOW()
+	AND (NOT EXISTS (SELECT 1 FROM payments p WHERE p.hold_id = h.id AND p.status = 'PENDING')
+	     OR h.expires_at + make_interval(secs => $%d) <= NOW()))`, param)
 }
 
 // ListShows returns all shows, earliest first.
@@ -157,9 +198,10 @@ func (r *PostgresRepository) GetSeat(ctx context.Context, seatID int64) (Seat, e
 // authority, and Redis may have lost keys or hold stale ones.
 //
 // LEFT JOIN keeps every seat, even those with no matching row; for those the
-// joined id is NULL. A seat is HELD only if its hold is ACTIVE *and* not past
-// expires_at by the database clock: a hold that expired but was not yet marked
-// EXPIRED (that happens lazily, on the next hold attempt) shows as AVAILABLE.
+// joined id is NULL. A seat is HELD if its hold is ACTIVE and not dead by
+// deadHoldCondition: not past expires_at, or past it but with a PENDING
+// payment younger than PendingHoldMax. A dead hold that was not yet marked
+// EXPIRED (the worker or the next hold attempt does that) shows as AVAILABLE.
 // Both joins use indexes: bookings_show_seat_unique and the partial index
 // holds_one_active_per_seat (which also guarantees at most one hold row per
 // seat, so the join cannot duplicate seats).
@@ -177,9 +219,9 @@ func (r *PostgresRepository) ListSeatsWithStatus(ctx context.Context, showID int
 		FROM seats s
 		LEFT JOIN bookings b ON b.show_id = s.show_id AND b.seat_id = s.id
 		LEFT JOIN holds h    ON h.show_id = s.show_id AND h.seat_id = s.id
-		                    AND h.status = 'ACTIVE' AND h.expires_at > NOW()
+		                    AND h.status = 'ACTIVE' AND NOT `+deadHoldCondition(2)+`
 		WHERE s.show_id = $1
-		ORDER BY s.id`, showID)
+		ORDER BY s.id`, showID, r.limits.PendingHoldMax.Seconds())
 	if err != nil {
 		return nil, dbError(err, "list seats for show %d", showID)
 	}
