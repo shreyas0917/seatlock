@@ -35,6 +35,7 @@ import (
 	"github.com/shreyas0917/seatlock/internal/lock"
 	"github.com/shreyas0917/seatlock/internal/payment"
 	"github.com/shreyas0917/seatlock/internal/paymentmock"
+	"github.com/shreyas0917/seatlock/internal/worker"
 )
 
 // stackOptions tune one test stack.
@@ -132,7 +133,12 @@ func newStack(t *testing.T, opts stackOptions) *stack {
 
 // serve starts an API server with the given locker and readiness pinger.
 func (s *stack) serve(locker booking.SeatLocker, redisPinger Pinger) string {
-	svc := booking.NewService(s.repo, locker, s.gateway, s.opts.holdTTL)
+	return s.serveWith(locker, redisPinger, s.gateway)
+}
+
+// serveWith also chooses the payment gateway (e.g. an unreachable one).
+func (s *stack) serveWith(locker booking.SeatLocker, redisPinger Pinger, gateway booking.PaymentGateway) string {
+	svc := booking.NewService(s.repo, locker, gateway, s.opts.holdTTL)
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	server := httptest.NewServer(NewRouter(svc, s.idem, s.pool, redisPinger, logger))
 	s.t.Cleanup(server.Close)
@@ -471,4 +477,60 @@ func TestPay_TwoKeysSameHoldConcurrent_OneBookingNoRefund(t *testing.T) {
 	assert.Equal(t, 1, st.TotalCharges, "1 charge")
 	assert.Zero(t, st.TotalRefunds, "0 refunds")
 	assert.Zero(t, s.count(`SELECT COUNT(*) FROM payments WHERE status IN ('REFUND_PENDING', 'REFUNDED')`))
+}
+
+// ============================================ Phase 4: the worker meets HTTP
+
+// (b) The same user re-holds a seat whose hold has a payment in flight:
+// 409 PAYMENT_IN_PROGRESS, not their old hold with seconds_left 0.
+func TestPay_ReHoldWhilePaymentPending_409(t *testing.T) {
+	s := newStack(t, stackOptions{paymentTimeout: time.Second})
+	holdID := s.hold("alice", 0)
+	s.queue(paymentmock.BehaviorTimeout)
+	require.Equal(t, http.StatusGatewayTimeout, s.confirm(s.url, "alice", "k-1", holdID).status)
+	s.pool.Exec(context.Background(), `UPDATE holds SET expires_at = NOW() - interval '1 second' WHERE id = $1`, holdID)
+
+	r := s.do(s.url, http.MethodPost, "/v1/holds", "alice", "", fmt.Sprintf(`{"show_id":%d,"seat_id":%d}`, s.showID, s.seatIDs[0]))
+
+	assert.Equal(t, http.StatusConflict, r.status, r.body)
+	assert.Equal(t, "PAYMENT_IN_PROGRESS", errorCode(t, r.body))
+	seats := s.do(s.url, http.MethodGet, fmt.Sprintf("/v1/shows/%d/seats", s.showID), "alice", "", "")
+	assert.Contains(t, seats.body, `"label":"A1","price_paise":25000,"status":"HELD"`, "the seat map shows it HELD")
+}
+
+// The user's confirm never reached the gateway (504), they walked away, and
+// the worker voided the key and abandoned the payment. When they come back
+// with the SAME Idempotency-Key, it must not reuse the voided key: a new
+// payment with a new key is charged. Exactly 1 successful charge in total.
+func TestPay_RetryWithOldKeyAfterWorkerAbandoned_ChargesOnce(t *testing.T) {
+	s := newStack(t, stackOptions{})
+	holdID := s.hold("alice", 0)
+	unreachable := payment.NewClient("http://127.0.0.1:1", 500*time.Millisecond)
+	downURL := s.serveWith(lock.NewRedisLocker(lock.NewClient(lock.Options{Addr: "127.0.0.1:1"}), s.opts.holdTTL, 10*time.Second), s.pool, unreachable)
+	r := s.confirm(downURL, "alice", "k-old", holdID)
+	require.Equal(t, http.StatusGatewayTimeout, r.status, r.body)
+	assert.Equal(t, "PAYMENT_PENDING", errorCode(t, r.body))
+
+	// The worker runs later: no charge at the gateway -> void -> ABANDONED.
+	_, err := s.pool.Exec(context.Background(), `UPDATE payments SET created_at = NOW() - interval '5 minutes'`)
+	require.NoError(t, err)
+	noRedis := lock.NewRedisLocker(lock.NewClient(lock.Options{Addr: "127.0.0.1:1"}), s.opts.holdTTL, 10*time.Second)
+	svc := booking.NewService(s.repo, noRedis, s.gateway, s.opts.holdTTL)
+	reconciler := &worker.Reconciler{Store: s.repo, Actions: svc, Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		OlderThan: 2 * time.Minute, Lease: time.Minute, BatchSize: 10}
+	_, err = reconciler.RunOnce(context.Background())
+	require.NoError(t, err)
+	var status string
+	require.NoError(t, s.pool.QueryRow(context.Background(), `SELECT status FROM payments`).Scan(&status))
+	require.Equal(t, "ABANDONED", status)
+
+	r = s.confirm(s.url, "alice", "k-old", holdID) // same key, gateway reachable again
+
+	require.Equal(t, http.StatusCreated, r.status, r.body)
+	st := s.mock.Stats()
+	assert.Equal(t, 1, st.MoneyTaken, "exactly 1 successful charge")
+	assert.Equal(t, 1, st.TotalVoids, "the old key was voided, never charged")
+	var keys int
+	require.NoError(t, s.pool.QueryRow(context.Background(), `SELECT COUNT(DISTINCT charge_key) FROM payments`).Scan(&keys))
+	assert.Equal(t, 2, keys, "the retry used a NEW charge key")
 }
