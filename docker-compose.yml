@@ -1,6 +1,7 @@
 # Local development stack.
 #   postgres : source of truth for shows, seats and bookings
 #   redis    : fast seat lock for holds (an optimisation; Postgres is the authority)
+#   payment  : mock payment gateway (separate binary, cmd/payment)
 #   api      : the SeatLock Go server
 # Values come from .env if it exists (see .env.example), otherwise the defaults after ":-".
 
@@ -33,8 +34,31 @@ services:
       timeout: 3s
       retries: 10
 
+  # Mock payment gateway (internal/paymentmock). In-memory state; demos
+  # control it with POST /debug/next-behavior and POST /debug/reset.
+  payment:
+    build:
+      context: .
+      target: payment
+    environment:
+      PAYMENT_ADDR: ":8090"
+      PAYMENT_FAIL_RATE: ${PAYMENT_FAIL_RATE:-0}
+      PAYMENT_MIN_DELAY: ${PAYMENT_MIN_DELAY:-0s}
+      PAYMENT_MAX_DELAY: ${PAYMENT_MAX_DELAY:-0s}
+      PAYMENT_SLOW_DELAY: ${PAYMENT_SLOW_DELAY:-3s}
+    ports:
+      # Host port 8095 (8090 is often taken); inside the Compose network it is payment:8090.
+      - "${PAYMENT_PORT:-8095}:8090"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:8090/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   api:
-    build: .
+    build:
+      context: .
+      target: api
     environment:
       HTTP_ADDR: ":8080"
       # Inside the Compose network, Postgres is reachable at host "postgres", port 5432.
