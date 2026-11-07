@@ -1,5 +1,7 @@
 # SeatLock
 
+[![CI](https://github.com/shreyas0917/seatlock/actions/workflows/ci.yml/badge.svg)](https://github.com/shreyas0917/seatlock/actions/workflows/ci.yml)
+
 **A high-concurrency ticket booking backend in Go that guarantees a seat can never be sold twice, even when 50 users click "Book" at the same instant, and even when Redis fails.**
 
 SeatLock is a backend-only system design project (think BookMyShow). It follows a **fail-closed booking policy**:
@@ -83,6 +85,7 @@ Full explanations: [docs/learning/phase-1.md](docs/learning/phase-1.md), [docs/l
 make test               # unit + handler tests (no database, no Redis)
 make test-integration   # + real Postgres and Redis (needs `make up`)
 make lint               # go vet + gofmt check
+make verify             # gofmt + vet + unit + integration tests; full log in tmp/ (push only if this passes)
 ```
 
 Key proofs (integration):
