@@ -1,0 +1,159 @@
+<!doctype html>
+<!-- Source of docs/images/architecture-detailed.png (rendered by render.cjs).
+     It shows only what is built: no waiting room, idempotency keys in
+     Postgres, /metrics on internal ports. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>SeatLock architecture</title>
+<style>
+  :root { --bg:#faf8f3; --ink:#1f1d1a; --muted:#6b665d; --line:#7a756c; --card:#ffffff; --border:#d9d4c9;
+          --hot:#c2410c; --hotbg:#fdf0e8; --mono: "DejaVu Sans Mono", "Liberation Mono", monospace; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); font-family: "DejaVu Sans", "Liberation Sans", Arial, sans-serif; color: var(--ink); }
+  #canvas { position: relative; width: 2400px; height: 1500px; padding: 56px 64px; background: var(--bg); }
+  h1 { margin: 0; font-size: 44px; letter-spacing: -0.5px; }
+  .sub { margin-top: 10px; font-size: 21px; color: var(--muted); }
+  .box { position: absolute; background: var(--card); border: 2px solid var(--border); border-radius: 14px; padding: 20px 24px; }
+  .box h2 { margin: 0 0 8px; font-size: 22px; }
+  .box p, .box li { margin: 0; font-size: 18px; line-height: 1.5; color: #3b3832; }
+  .box ul { margin: 0; padding-left: 20px; }
+  .hot { border-color: var(--hot); background: var(--hotbg); }
+  .mono { font-family: var(--mono); font-size: 16px; }
+  .hotmono { font-family: var(--mono); font-size: 16px; color: var(--hot); }
+  .group { position: absolute; border: 2px dashed var(--border); border-radius: 18px; }
+  .glabel { position: absolute; font-size: 15px; letter-spacing: 2px; color: var(--muted); font-weight: bold; }
+  svg { position: absolute; left: 0; top: 0; }
+  .lbl { font-size: 17px; fill: var(--muted); }
+  .lblhot { font-size: 17px; fill: var(--hot); }
+</style>
+</head>
+<body>
+<div id="canvas">
+  <h1>SeatLock — Architecture</h1>
+  <div class="sub">Flash-sale ticket booking backend · Go · PostgreSQL is the authority · Redis is only a fast lock · fail-closed by design</div>
+
+  <svg width="2400" height="1500" viewBox="0 0 2400 1500">
+    <defs>
+      <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#7a756c"/></marker>
+      <marker id="h" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#c2410c"/></marker>
+    </defs>
+    <!-- clients -> api -->
+    <line x1="400" y1="640" x2="520" y2="640" stroke="#7a756c" stroke-width="3" marker-end="url(#a)"/>
+    <text x="420" y="625" class="lbl">HTTP :8080</text>
+    <!-- holds -> redis -->
+    <line x1="1060" y1="400" x2="1250" y2="400" stroke="#c2410c" stroke-width="3" marker-end="url(#h)"/>
+    <text x="1080" y="385" class="lblhot">1. lock (SET NX)</text>
+    <!-- holds -> postgres -->
+    <line x1="1060" y1="430" x2="1250" y2="640" stroke="#c2410c" stroke-width="3" marker-end="url(#h)"/>
+    <text x="1085" y="560" class="lblhot">2. hold txn</text>
+    <!-- confirm -> postgres -->
+    <line x1="1060" y1="690" x2="1250" y2="690" stroke="#c2410c" stroke-width="3" marker-end="url(#h)"/>
+    <text x="1075" y="675" class="lblhot">Tx A · Tx B</text>
+    <!-- confirm -> gateway -->
+    <polyline points="1060,735 1160,735 1160,1005 1250,1005" fill="none" stroke="#7a756c" stroke-width="3" marker-end="url(#a)"/>
+    <text x="1170" y="975" class="lbl">charge</text>
+    <!-- seat map -> postgres -->
+    <line x1="1060" y1="840" x2="1250" y2="840" stroke="#7a756c" stroke-width="3" marker-end="url(#a)"/>
+    <text x="1180" y="828" class="lbl">read</text>
+    <!-- worker -> postgres -->
+    <line x1="1780" y1="700" x2="1720" y2="700" stroke="#7a756c" stroke-width="3" marker-end="url(#a)"/>
+    <!-- worker -> redis (release) -->
+    <polyline points="2030,560 2030,400 1720,400" fill="none" stroke="#7a756c" stroke-width="3" marker-end="url(#a)"/>
+    <text x="1760" y="385" class="lbl">release lock (outbox)</text>
+    <!-- worker -> gateway -->
+    <polyline points="2030,860 2030,1010 1720,1010" fill="none" stroke="#7a756c" stroke-width="3" marker-end="url(#a)"/>
+    <text x="1760" y="995" class="lbl">lookup · void · refund</text>
+    <!-- metrics -->
+    <line x1="790" y1="1100" x2="790" y2="1230" stroke="#7a756c" stroke-width="3" marker-end="url(#a)"/>
+    <text x="805" y="1150" class="lbl">scrape every 5 s (internal ports only)</text>
+    <polyline points="2030,860 2030,1205 1000,1205 1000,1232" fill="none" stroke="#7a756c" stroke-width="2" stroke-dasharray="8 6" marker-end="url(#a)"/>
+    <text x="1530" y="1195" class="lbl">worker :9092</text>
+    <line x1="1060" y1="1300" x2="1250" y2="1300" stroke="#7a756c" stroke-width="3" marker-end="url(#a)"/>
+    <text x="1110" y="1285" class="lbl">queries</text>
+  </svg>
+
+  <div class="box" style="left:64px; top:540px; width:336px; height:210px;">
+    <h2>Clients</h2>
+    <p>k6 load tests<br>demo/*.sh scripts<br>Swagger UI · curl</p>
+  </div>
+
+  <div class="group" style="left:520px; top:220px; width:560px; height:900px;"></div>
+  <div class="glabel" style="left:548px; top:238px;">SEATLOCK API · GO (CHI)</div>
+  <div class="glabel" style="left:548px; top:262px; letter-spacing:0; font-weight:normal; font-size:15px;">stateless · 1 replica (2 behind nginx in the scale profile)</div>
+
+  <div class="box hot" style="left:550px; top:300px; width:510px; height:170px;">
+    <h2>POST /v1/holds</h2>
+    <p>Redis lock first (fail closed: 503 if Redis is down), then the hold transaction in Postgres. Hold = 5 minutes.</p>
+  </div>
+  <div class="box hot" style="left:550px; top:500px; width:510px; height:250px;">
+    <h2>POST /v1/bookings</h2>
+    <p>Idempotency-Key claimed in Postgres (lease), then<br><b>Tx A</b> → gateway → <b>Tx B</b>.<br>Lost answer → 504, payment stays PENDING. Never touches Redis.</p>
+  </div>
+  <div class="box" style="left:550px; top:780px; width:510px; height:150px;">
+    <h2>GET seat map · DELETE hold</h2>
+    <p>Seat status from Postgres only.<br>Cancel writes a RELEASE_LOCK outbox row.</p>
+  </div>
+  <div class="box" style="left:550px; top:960px; width:510px; height:140px;">
+    <h2>Internal port :9091</h2>
+    <p class="mono">/metrics · /debug/pprof</p>
+    <p>(public port answers 404)</p>
+  </div>
+
+  <div class="glabel" style="left:1250px; top:238px;">STATE</div>
+  <div class="box hot" style="left:1250px; top:300px; width:470px; height:200px;">
+    <h2>Redis · fast lock only</h2>
+    <p class="hotmono">seat:{show}:{seat} = user</p>
+    <p class="hotmono">SET NX EX 310  (DB hold 300 s)</p>
+    <p>Can lose keys: never the authority.</p>
+  </div>
+  <div class="box hot" style="left:1250px; top:540px; width:470px; height:330px;">
+    <h2>PostgreSQL · source of truth</h2>
+    <p class="mono">holds: 1 ACTIVE per seat (partial index)</p>
+    <p class="hotmono">bookings: UNIQUE(show_id, seat_id)</p>
+    <p class="mono">payments: one live per hold</p>
+    <p class="mono">idempotency_keys · outbox</p>
+    <p style="margin-top:8px">Every expiry uses the DB clock.</p>
+  </div>
+  <div class="box" style="left:1250px; top:920px; width:470px; height:170px;">
+    <h2>Payment gateway (mock)</h2>
+    <p>Idempotent charge per key · refund · void.<br>Lookup tells what really happened.</p>
+  </div>
+
+  <div class="box" style="left:1780px; top:560px; width:500px; height:300px;">
+    <h2>Background worker</h2>
+    <p style="margin-bottom:6px">N replicas, no leader: FOR UPDATE SKIP LOCKED + leases</p>
+    <ul>
+      <li>payment reconciler · 30 s</li>
+      <li>outbox drainer (refunds, lock release) · 5 s</li>
+      <li>hold expirer · 10 s</li>
+      <li>invariants (verify.sql as gauges) · 15 s</li>
+      <li>idempotency key cleanup · 1 h</li>
+    </ul>
+  </div>
+
+  <div class="box" style="left:64px; top:250px; width:400px; height:240px;">
+    <h2>Guarantees</h2>
+    <p>0 double bookings (DB constraint)<br>0 double charges (idempotent keys)<br>Redis down → new holds 503, confirms OK<br>Money taken without a seat → refunded</p>
+  </div>
+
+  <div class="glabel" style="left:550px; top:1210px;">OBSERVABILITY</div>
+  <div class="box" style="left:550px; top:1235px; width:510px; height:130px;">
+    <h2>Prometheus</h2>
+    <p>scrapes api :9091, worker :9092 · 9 alert rules (promtool-tested)</p>
+  </div>
+  <div class="box" style="left:1250px; top:1235px; width:470px; height:130px;">
+    <h2>Grafana</h2>
+    <p>"SeatLock — Reliability" dashboard, provisioned from the repo</p>
+  </div>
+  <div class="box" style="left:1780px; top:1235px; width:500px; height:130px;">
+    <h2>Proof</h2>
+    <p>verify.sql = 0 rows after every demo, load and chaos run · CI load gate</p>
+  </div>
+
+  <div class="box" style="left:64px; top:1235px; width:336px; height:130px;">
+    <p><b style="color:var(--hot)">Orange</b> = correctness path<br>grey = supporting flow<br>dashed = metrics</p>
+  </div>
+</div>
+</body>
+</html>

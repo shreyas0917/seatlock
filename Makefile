@@ -10,7 +10,7 @@ SWAG_VERSION  := v1.16.4
 # Extra flags for go test, e.g. `make test TEST_FLAGS=-race` (CI does this on Linux).
 TEST_FLAGS    ?=
 
-.PHONY: help up up-demo up-bench up-scale seed-load down logs run test test-integration verify verify-sql migrate-up migrate-down seed reset-data outbox-retry swagger lint
+.PHONY: help screenshots images up up-demo up-bench up-scale seed-load down logs run test test-integration verify verify-sql migrate-up migrate-down seed reset-data outbox-retry swagger lint
 
 ## up: build and start the whole stack (postgres, redis, payment mock, api, worker, prometheus, grafana)
 up:
@@ -101,6 +101,14 @@ swagger:
 	@command -v swag >/dev/null || (echo "swag not found. Install it: go install github.com/swaggo/swag/cmd/swag@$(SWAG_VERSION)"; exit 1)
 	swag init -g cmd/api/main.go -o docs --parseInternal
 	gofmt -w docs/docs.go
+
+## screenshots: re-take the README screenshots from real demo + chaos runs (~10 min)
+screenshots:
+	./docs/images/src/screenshots.sh
+
+## images: re-render the architecture diagram and the social preview from their HTML
+images:
+	./docs/images/src/screenshots.sh --render-only
 
 ## help: list every target with a one-line description (this list)
 help:

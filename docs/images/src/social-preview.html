@@ -1,0 +1,53 @@
+<!doctype html>
+<!-- Source of docs/images/social-preview.png (1280x640, GitHub social preview).
+     Every number comes from docs/benchmarks/RESULTS.md, worded as measured. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>SeatLock social preview</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: "DejaVu Sans", "Liberation Sans", Arial, sans-serif; }
+  #canvas { width: 1280px; height: 640px; padding: 48px 56px; background: #faf8f3; color: #1f1d1a; position: relative; }
+  .name { font-size: 64px; font-weight: bold; letter-spacing: -1px; }
+  .name span { color: #c2410c; }
+  .pitch { margin-top: 10px; font-size: 25px; line-height: 1.35; color: #3b3832; width: 1150px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px 22px; margin-top: 30px; width: 760px; }
+  .stat { background: #fff; border: 2px solid #d9d4c9; border-radius: 12px; padding: 14px 18px; }
+  .stat b { display: block; font-size: 27px; color: #c2410c; }
+  .stat span { font-size: 16px; color: #3b3832; line-height: 1.35; }
+  .arch { position: absolute; right: 56px; top: 222px; width: 400px; }
+  .node { border: 2px solid #d9d4c9; background: #fff; border-radius: 10px; padding: 9px 12px; font-size: 16px; text-align: center; }
+  .hot { border-color: #c2410c; background: #fdf0e8; }
+  .arrow { text-align: center; color: #7a756c; font-size: 18px; line-height: 22px; }
+  .row { display: flex; gap: 10px; }
+  .row .node { flex: 1; }
+  .foot { position: absolute; left: 56px; bottom: 30px; font-size: 16px; color: #6b665d; }
+  .stack { position: absolute; right: 56px; bottom: 30px; font-size: 16px; color: #6b665d; }
+</style>
+</head>
+<body>
+<div id="canvas">
+  <div class="name">Seat<span>Lock</span></div>
+  <div class="pitch">A flash-sale ticket booking backend in Go that never double-books, even when Redis, the payment gateway or Postgres fail.</div>
+  <div class="grid">
+    <div class="stat"><b>100 of 100 seats</b><span>5,000 booking attempts in a 10 s burst → exactly 100 bookings, 3 of 3 runs · p95 hold 15 ms</span></div>
+    <div class="stat"><b>0 double charges</b><span>across 5 chaos tests under load: Redis, API replica, worker, slow gateway, Postgres</span></div>
+    <div class="stat"><b>−32% DB round trips</b><span>p95 seat map −39% after a profiled fix (pprof + Prometheus)</span></div>
+    <div class="stat"><b>CI load gate</b><span>k6 smoke on every push and PR fails the build on any double booking</span></div>
+  </div>
+  <div class="arch">
+    <div class="node">clients · k6</div>
+    <div class="arrow">↓</div>
+    <div class="node hot">Go API (chi)</div>
+    <div class="arrow">↓</div>
+    <div class="row"><div class="node hot">Redis<br><small>fast lock</small></div><div class="node hot">PostgreSQL<br><small>authority</small></div><div class="node">gateway<br><small>idempotent</small></div></div>
+    <div class="arrow">↑</div>
+    <div class="node">worker · outbox · SKIP LOCKED</div>
+    <div class="arrow">↓</div>
+    <div class="node">Prometheus · Grafana · 9 alerts</div>
+  </div>
+  <div class="foot">Numbers: one laptop, local, not production capacity · github.com/shreyas0917/seatlock</div>
+</div>
+</body>
+</html>

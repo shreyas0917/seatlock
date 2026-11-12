@@ -1,8 +1,21 @@
 # Screenshots
 
-This folder holds the screenshots used in the main README. They are taken by hand from the running stack (the dashboard is the project's "UI").
+This folder holds the images used in the main README. They come from **real runs** of the stack (the dashboard is the project's "UI"); nothing is edited or cropped.
 
-## How to produce the data
+| File | What it shows | Made by |
+|---|---|---|
+| `dashboard-overview.png` | All demos: the Correctness row (all green), traffic and latency | `make screenshots` |
+| `dashboard-fail-closed.png` | `chaos/redis-down.sh` under load: the `lock_unavailable` spike and Redis acquire errors | `make screenshots` |
+| `dashboard-worker.png` | The worker demos: job runs, seconds since last success, outbox, money vs refunds | `make screenshots` |
+| `prometheus-alerts.png` | All 9 alert rules | `make screenshots` |
+| `architecture-detailed.png` | The architecture as built | `make images` (from [src/architecture.html](src/architecture.html)) |
+| `social-preview.png` | GitHub social preview (1280×640) | `make images` (from [src/social-preview.html](src/social-preview.html)) |
+
+**`make screenshots`** ([src/screenshots.sh](src/screenshots.sh)) runs the worker demos, the request-path demos and `chaos/redis-down.sh` under load, then captures with a headless Chromium (Playwright in Docker, 1920×1080, Grafana kiosk mode, dark theme). It fails if a captured panel shows "No data", an error, or is still loading. **`make images`** only re-renders the two HTML sources.
+
+## Taking them by hand
+
+### How to produce the data
 
 ```bash
 make up && make seed && make reset-data
@@ -17,7 +30,7 @@ make up-demo && make reset-data
 make up                          # back to normal timings afterwards
 ```
 
-## Screenshots to take
+### Screenshots to take
 
 Use a browser window of **1920×1080**, the dashboard time range **"Last 15 minutes"**, and wait for one 5s refresh.
 
