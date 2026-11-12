@@ -29,6 +29,7 @@ tests:
               severity: critical
               check: double_booking
             exp_annotations:
+              runbook_url: "docs/RUNBOOK.md#doublebookingdetected"
               summary: "Invariant violated: double_booking"
               description: 'The invariant check "double_booking" finds 1 violating row(s). This is a correctness incident (double booking, money taken without a seat, or a refunded seat that is still booked). Run demo/verify.sql to see the rows.'
 
@@ -57,6 +58,7 @@ tests:
               severity: warning
               worker_job: outbox_drainer
             exp_annotations:
+              runbook_url: "docs/RUNBOOK.md#workerjobstalled"
               summary: "Worker job outbox_drainer has not succeeded for 5 intervals"
               description: 'The outbox_drainer job has not completed a successful run for more than 5 times its interval. Its work (reconciling, refunds, expiring holds) is piling up. Check the worker logs for "job run failed".'
 
@@ -75,5 +77,6 @@ tests:
           - exp_labels:
               severity: warning
             exp_annotations:
+              runbook_url: "docs/RUNBOOK.md#outboxdeadletters"
               summary: "2 outbox row(s) dead-lettered"
               description: "An outbox row (a refund or a Redis lock release) failed OUTBOX_MAX_ATTEMPTS times and is no longer retried. A refund may be owed. Inspect last_error, fix the cause, then `make outbox-retry ID=<id>`."

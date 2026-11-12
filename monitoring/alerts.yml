@@ -21,6 +21,7 @@ groups:
         labels:
           severity: critical
         annotations:
+          runbook_url: "docs/RUNBOOK.md#doublebookingdetected"
           summary: "Invariant violated: {{ $labels.check }}"
           description: >-
             The invariant check "{{ $labels.check }}" finds {{ $value }} violating row(s).
@@ -37,6 +38,7 @@ groups:
         labels:
           severity: critical
         annotations:
+          runbook_url: "docs/RUNBOOK.md#invariantchecksnotrunning"
           summary: "Invariant checks are not running ({{ $labels.check }})"
           description: >-
             No successful invariant check for over 2 minutes. Double bookings would go
@@ -48,6 +50,7 @@ groups:
         labels:
           severity: warning
         annotations:
+          runbook_url: "docs/RUNBOOK.md#outboxdeadletters"
           summary: "{{ $value }} outbox row(s) dead-lettered"
           description: >-
             An outbox row (a refund or a Redis lock release) failed OUTBOX_MAX_ATTEMPTS times
@@ -60,6 +63,7 @@ groups:
         labels:
           severity: critical
         annotations:
+          runbook_url: "docs/RUNBOOK.md#paymentsstuckpending"
           summary: "A payment has been PENDING for {{ $value | humanizeDuration }}"
           description: >-
             The oldest PENDING payment is older than 15 minutes, although the reconciler
@@ -79,6 +83,7 @@ groups:
         labels:
           severity: warning
         annotations:
+          runbook_url: "docs/RUNBOOK.md#workerjobstalled"
           summary: "Worker job {{ $labels.worker_job }} has not succeeded for 5 intervals"
           description: >-
             The {{ $labels.worker_job }} job has not completed a successful run for more than
@@ -95,6 +100,7 @@ groups:
         labels:
           severity: warning
         annotations:
+          runbook_url: "docs/RUNBOOK.md#higherrorrate"
           summary: "{{ $value | humanizePercentage }} of API requests fail with 5xx"
           description: >-
             More than 1% of requests return 5xx over 5 minutes. Look at the RPS by route and
@@ -109,6 +115,7 @@ groups:
         labels:
           severity: critical
         annotations:
+          runbook_url: "docs/RUNBOOK.md#redislockunavailable"
           summary: "New holds are failing closed: Redis seat lock unavailable"
           description: >-
             Hold requests get 503 LOCK_UNAVAILABLE because Redis cannot be reached. Nobody
@@ -124,6 +131,7 @@ groups:
         labels:
           severity: warning
         annotations:
+          runbook_url: "docs/RUNBOOK.md#slowholds"
           summary: "p95 of POST /v1/holds is {{ $value | humanizeDuration }}"
           description: >-
             5% of hold requests take longer than 250ms. Holding is the hot path of a sale.
@@ -138,6 +146,7 @@ groups:
         labels:
           severity: warning
         annotations:
+          runbook_url: "docs/RUNBOOK.md#dbpoolsaturated"
           summary: "Requests are waiting for database connections"
           description: >-
             Time spent waiting to acquire a pooled connection is growing fast. Requests may
