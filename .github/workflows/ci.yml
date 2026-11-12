@@ -1,4 +1,4 @@
-# CI: runs the SAME checks as scripts/verify.sh (gofmt, vet, promtool on the
+# CI: runs the SAME checks as scripts/verify.sh (gofmt, vet, markdown link check, promtool on the
 # monitoring config, unit and
 # integration tests) on every push and pull request, against real
 # PostgreSQL 16 and Redis 7 service containers.
@@ -55,7 +55,7 @@ jobs:
       - name: Build binaries
         run: go build -o /tmp/bin/ ./cmd/...
 
-      - name: Verify (gofmt, vet, promtool checks, unit + integration tests, with -race)
+      - name: Verify (gofmt, vet, link check, promtool checks, unit + integration tests, with -race)
         run: TEST_FLAGS=-race ./scripts/verify.sh
 
       - name: Upload verify log

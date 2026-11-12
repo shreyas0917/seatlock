@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # verify.sh - the ONE command that decides whether the code may be pushed.
 #
-#   gofmt (must list no files) -> go vet -> monitoring config (promtool)
-#   -> unit tests -> integration tests
+#   gofmt (must list no files) -> go vet -> markdown links (lychee, offline)
+#   -> monitoring config (promtool) -> unit tests -> integration tests
 #
 # Every line of output is also saved, UNFILTERED, to tmp/verify-<timestamp>.log
 # (tmp/ is gitignored). Rule: only push when this script exits 0. When it
@@ -46,6 +46,21 @@ step "go vet"
 go vet ./...
 go vet -tags=integration ./...
 echo "ok"
+
+step "markdown links: lychee --offline (every relative link and #anchor must exist)"
+# Same pinned image locally and in CI. Checks the markdown git knows about
+# (tracked + new, not ignored), so tmp/ and other ignored files are skipped.
+LYCHEE_IMAGE="lycheeverse/lychee:0.24.2"
+if docker info > /dev/null 2>&1; then
+  mapfile -t MD_FILES < <(git ls-files --cached --others --exclude-standard '*.md')
+  REPO="$(pwd -W 2> /dev/null || pwd)"
+  MSYS_NO_PATHCONV=1 docker run --rm -v "$REPO:/repo:ro" -w /repo "$LYCHEE_IMAGE"     --offline --no-progress --include-fragments "${MD_FILES[@]}"
+elif [ "${CI:-}" = "true" ]; then
+  echo "Docker is required for the link check in CI"
+  false
+else
+  echo "SKIPPED: Docker is not available here (CI always runs this check)"
+fi
 
 step "monitoring config: promtool check config / check rules / test rules"
 # Same Prometheus image as docker-compose.yml, so promtool matches the server.
