@@ -10,26 +10,26 @@ SWAG_VERSION  := v1.16.4
 # Extra flags for go test, e.g. `make test TEST_FLAGS=-race` (CI does this on Linux).
 TEST_FLAGS    ?=
 
-.PHONY: up up-demo up-bench up-scale seed-load down logs run test test-integration verify verify-sql migrate-up migrate-down seed reset-data outbox-retry swagger lint
+.PHONY: help up up-demo up-bench up-scale seed-load down logs run test test-integration verify verify-sql migrate-up migrate-down seed reset-data outbox-retry swagger lint
 
-## up: build the API image and start postgres, redis and api in the background
+## up: build and start the whole stack (postgres, redis, payment mock, api, worker, prometheus, grafana)
 up:
 	docker compose up -d --build --wait
 
-## up-demo: like `up`, but with the SHORT timings of docker-compose.demo.yml
-##          (20s holds, worker every few seconds). Needed by the worker demos.
+## up-demo: like `up`, with short demo timings (20s holds); needed by the worker demos
+##          (docker-compose.demo.yml: 20s holds, worker every few seconds). Needed by the worker demos.
 ##          `make up` switches back to the normal timings.
 up-demo:
 	docker compose -f docker-compose.yml -f docker-compose.demo.yml up -d --build --wait
 
-## up-bench: like `up`, with docker-compose.bench.yml (mock gateway answers in
-##           50-150 ms, everything else normal). Used for the load tests.
+## up-bench: like `up`, with a realistic 50-150 ms mock gateway; used for the load tests
+##           (docker-compose.bench.yml; every other setting stays normal).
 up-bench:
 	docker compose -f docker-compose.yml -f docker-compose.bench.yml up -d --build --wait
 
-## up-scale: like up-bench, plus the "scale" profile: a second api replica
-##           (api-2) behind an nginx load balancer at http://localhost:8088
-##           (http://lb inside the network). Used by chaos/api-replica.sh.
+## up-scale: like up-bench, plus a second api replica behind nginx (chaos/api-replica.sh)
+##           (profile "scale": api-2 + lb at http://localhost:8088,
+##           http://lb inside the network).
 up-scale:
 	docker compose -f docker-compose.yml -f docker-compose.bench.yml --profile scale up -d --build --wait
 
@@ -55,7 +55,7 @@ test:
 test-integration:
 	go test -count=1 -p 1 -tags=integration $(TEST_FLAGS) ./...
 
-## verify: gofmt + vet + unit + integration tests, full log in tmp/. Push only if this passes.
+## verify: the push gate: gofmt, vet, promtool, unit + integration tests (log in tmp/)
 verify:
 	./scripts/verify.sh
 
@@ -71,20 +71,20 @@ migrate-down:
 seed:
 	docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U $(POSTGRES_USER) -d $(POSTGRES_DB) < db/seed/seed.sql
 
-## seed-load: load-test data: a 100-seat rush show, a 20-seat smoke show and
-##            200 shows x 200 seats (safe to run more than once)
+## seed-load: load-test data: rush (100 seats), smoke (20) and 200 x 200-seat shows
+##            (safe to run more than once)
 seed-load:
 	docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U $(POSTGRES_USER) -d $(POSTGRES_DB) < db/seed/load.sql
 
-## reset-data: delete all bookings, holds, payments, outbox rows and idempotency keys
-##             (keeps shows and seats) AND the Redis seat locks, so the demos have
-##             free seats again and Redis agrees with Postgres
+## reset-data: free every seat: clear bookings, holds, payments, outbox, keys and Redis locks
+##             (keeps shows and seats), so the demos have free seats again
+##             and Redis agrees with Postgres
 reset-data:
 	docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U $(POSTGRES_USER) -d $(POSTGRES_DB) -c "TRUNCATE bookings, payments, holds, outbox, idempotency_keys RESTART IDENTITY"
 	docker compose exec -T redis sh -c "redis-cli --scan --pattern 'seat:*' | xargs -r redis-cli del"
 
-## outbox-retry: put ONE dead-lettered (FAILED) outbox row back in the queue,
-##               after fixing its cause:  make outbox-retry ID=42
+## outbox-retry: re-queue ONE dead-lettered (FAILED) outbox row:  make outbox-retry ID=42
+##               (after fixing its cause)
 ##               (the same SQL as booking.PostgresRepository.RequeueOutbox)
 outbox-retry:
 	@test -n "$(ID)" || (echo "usage: make outbox-retry ID=<outbox id>"; exit 1)
@@ -101,6 +101,10 @@ swagger:
 	@command -v swag >/dev/null || (echo "swag not found. Install it: go install github.com/swaggo/swag/cmd/swag@$(SWAG_VERSION)"; exit 1)
 	swag init -g cmd/api/main.go -o docs --parseInternal
 	gofmt -w docs/docs.go
+
+## help: list every target with a one-line description (this list)
+help:
+	@awk '/^## [a-z][a-z-]*:/ { sub(/^## /, ""); split($$0, p, ": "); printf "  %-17s %s\n", p[1], substr($$0, length(p[1]) + 3) }' $(MAKEFILE_LIST)
 
 ## lint: go vet + check formatting (fails if any file is not gofmt-ed)
 lint:
